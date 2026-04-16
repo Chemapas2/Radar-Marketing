@@ -1,4 +1,5 @@
 import io
+import json
 import math
 import os
 import re
@@ -1361,6 +1362,809 @@ def main() -> None:
                 with st.expander("Referencias bibliográficas / documentales"):
                     for entry in bibliography_entries(results):
                         st.markdown(f"- {entry}")
+            else:
+                st.info("Primero ejecuta la búsqueda y luego genera el briefing.")
+
+    else:
+        st.info(
+            "Configura los filtros de la barra lateral y pulsa **Buscar y actualizar radar**. "
+            "Después podrás conversar con la app y generar el informe en Word."
+        )
+
+    st.divider()
+    st.caption(
+        "Aviso: esta herramienta no sustituye la revisión técnica, regulatoria ni jurídica. "
+        "Antes de usar conclusiones en documentos externos o claims comerciales, valida cada punto con la fuente primaria."
+    )
+
+
+# =========================
+# Improved market/regulatory search and link rendering
+# =========================
+
+OFFICIAL_REGULATORY_DOMAINS = [
+    "boe.es",
+    "eur-lex.europa.eu",
+    "efsa.europa.eu",
+    "food.ec.europa.eu",
+    "ec.europa.eu",
+    "europa.eu",
+    "mapa.gob.es",
+    "miteco.gob.es",
+]
+
+
+def _ymd(value: date) -> str:
+    return value.strftime("%Y%m%d")
+
+
+def _gdelt_range(start_date: date, end_date: date) -> Optional[Tuple[date, date]]:
+    today = date.today()
+    max_lookback = today - timedelta(days=89)
+    clipped_start = max(start_date, max_lookback)
+    clipped_end = min(end_date, today)
+    if clipped_start > clipped_end:
+        return None
+    return clipped_start, clipped_end
+
+
+def _gdelt_timestamp(value: date, *, end_of_day: bool = False) -> str:
+    if end_of_day:
+        dt = datetime(value.year, value.month, value.day, 23, 59, 59)
+    else:
+        dt = datetime(value.year, value.month, value.day, 0, 0, 0)
+    return dt.strftime("%Y%m%d%H%M%S")
+
+
+def _flatten_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return ", ".join(filter(None, (_flatten_text(item) for item in value)))
+    if isinstance(value, dict):
+        preferred = [
+            value.get("descripcion"),
+            value.get("descripcionMateria"),
+            value.get("nombre"),
+            value.get("value"),
+            value.get("texto"),
+            value.get("titulo"),
+        ]
+        flat = ", ".join(filter(None, (_flatten_text(item) for item in preferred)))
+        if flat:
+            return flat
+        return ", ".join(filter(None, (_flatten_text(item) for item in value.values())))
+    return str(value)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def search_gdelt_articles(query: str, start_date: date, end_date: date, max_results: int = 20) -> List[dict]:
+    clipped = _gdelt_range(start_date, end_date)
+    if not clipped:
+        return []
+    gdelt_start, gdelt_end = clipped
+
+    base_url = "https://api.gdeltproject.org/api/v2/doc/doc"
+    base_params = {
+        "query": query,
+        "mode": "artlist",
+        "maxrecords": max_results,
+        "sort": "DateDesc",
+        "STARTDATETIME": _gdelt_timestamp(gdelt_start),
+        "ENDDATETIME": _gdelt_timestamp(gdelt_end, end_of_day=True),
+    }
+
+    data = None
+    for fmt in ["jsonfeed", "json"]:
+        try:
+            data = _request(base_url, params={**base_params, "format": fmt}, expect="json")
+            if data:
+                break
+        except Exception:
+            continue
+    if not data:
+        return []
+
+    items = data.get("items") or data.get("articles") or data.get("data") or []
+    if isinstance(items, dict):
+        items = items.get("items") or items.get("articles") or []
+
+    records: List[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        url = _clean_url(item.get("url") or item.get("url_mobile") or item.get("external_url") or "")
+        title = _strip_html(item.get("title") or item.get("headline") or "Sin título")
+        published_raw = item.get("date_published") or item.get("date_modified") or item.get("seendate") or item.get("pubDate") or ""
+        published = _parse_date(published_raw)
+        if published and not _date_in_range(published, start_date, end_date):
+            continue
+
+        domain = item.get("domain") or urlparse(url).netloc or item.get("source") or "GDELT"
+        language = item.get("language") or ""
+        source_country = item.get("sourcecountry") or item.get("source_country") or ""
+        summary = _strip_html(item.get("summary") or item.get("content_text") or item.get("content_html") or "")
+        if not summary:
+            parts = []
+            if domain:
+                parts.append(f"Dominio: {domain}")
+            if language:
+                parts.append(f"Idioma: {language}")
+            if source_country:
+                parts.append(f"País fuente: {source_country}")
+            summary = " | ".join(parts) or "Resultado recuperado a través de GDELT."
+
+        records.append(
+            {
+                "title": title,
+                "snippet": _truncate(summary),
+                "url": url,
+                "source": domain,
+                "published": published.isoformat() if published else str(published_raw),
+                "source_db": "GDELT",
+                "language": language,
+            }
+        )
+    return _dedupe(records)
+
+
+def _walk_objects(payload):
+    if isinstance(payload, dict):
+        yield payload
+        for value in payload.values():
+            yield from _walk_objects(value)
+    elif isinstance(payload, list):
+        for value in payload:
+            yield from _walk_objects(value)
+
+
+def _extract_boe_documents(payload) -> List[dict]:
+    documents: List[dict] = []
+    for obj in _walk_objects(payload):
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("identificador") and obj.get("titulo"):
+            documents.append(obj)
+    return documents
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def search_boe_legislation(query_terms: Tuple[str, ...], start_date: date, end_date: date, max_results: int = 15) -> List[dict]:
+    cleaned_terms = []
+    for term in query_terms:
+        norm = _normalize(term)
+        if len(norm) < 3:
+            continue
+        cleaned_terms.append(term.replace('"', '').strip())
+    cleaned_terms = _unique_keep_order(cleaned_terms)[:8]
+    if not cleaned_terms:
+        return []
+
+    clauses = []
+    for term in cleaned_terms:
+        safe = term.strip()
+        if not safe:
+            continue
+        phrase = _safe_phrase(safe)
+        clauses.append(f"(titulo:{phrase} OR texto:{phrase})")
+
+    query_obj = {
+        "query": {
+            "query_string": {"query": " OR ".join(clauses)},
+            "range": {"fecha_publicacion": {"gte": _ymd(start_date), "lte": _ymd(end_date)}},
+        },
+        "sort": [{"fecha_publicacion": "desc"}],
+    }
+
+    params = {"query": json.dumps(query_obj, ensure_ascii=False), "limit": max_results}
+    data = _request(
+        "https://boe.es/datosabiertos/api/legislacion-consolidada",
+        params=params,
+        expect="json",
+    )
+
+    documents = _extract_boe_documents(data)
+    records: List[dict] = []
+    for item in documents:
+        identifier = item.get("identificador", "")
+        title = _strip_html(item.get("titulo", "Sin título"))
+        published = str(item.get("fecha_publicacion", ""))
+        if len(published) == 8 and published.isdigit():
+            published = f"{published[:4]}-{published[4:6]}-{published[6:8]}"
+
+        snippet_bits = []
+        for label, field in [
+            ("Rango", item.get("rango")),
+            ("Departamento", item.get("departamento")),
+            ("Ámbito", item.get("ambito")),
+            ("Materia", item.get("materia") or item.get("materias")),
+            ("Vigencia", item.get("fecha_vigencia")),
+        ]:
+            flat = _flatten_text(field)
+            if flat:
+                snippet_bits.append(f"{label}: {flat}")
+        snippet = " | ".join(snippet_bits) or "Documento normativo recuperado desde la API oficial del BOE."
+
+        records.append(
+            {
+                "title": title,
+                "snippet": _truncate(snippet),
+                "url": f"https://www.boe.es/buscar/doc.php?id={identifier}" if identifier else "",
+                "source": "BOE",
+                "published": published,
+                "source_db": "BOE API",
+                "identifier": identifier,
+            }
+        )
+    return _dedupe(records)
+
+
+def _build_text_query(terms: List[str], *, extras: Optional[List[str]] = None, limit: int = 14) -> str:
+    chunks = _unique_keep_order((terms or []) + (extras or []))
+    return " ".join(chunks[:limit]).strip()
+
+
+def build_queries(species: str, user_keywords: str) -> Dict[str, object]:
+    science_meta = build_science_queries(species, user_keywords)
+    species_terms = science_meta["species_terms"][:5]
+    topic_terms = science_meta["expanded_terms"][:10]
+    market_terms = _unique_keep_order(science_meta["market_terms"] + [
+        "prices",
+        "price",
+        "costs",
+        "cost",
+        "demand",
+        "supply",
+        "trade",
+        "imports",
+        "exports",
+        "margin",
+        "production",
+        "consumption",
+    ])
+    regulation_terms = _unique_keep_order(science_meta["regulation_terms"] + [
+        "regulation",
+        "legislation",
+        "law",
+        "decree",
+        "order",
+        "decision",
+        "EFSA",
+        "EUR-Lex",
+        "BOE",
+        "official journal",
+        "animal health law",
+        "implementing regulation",
+    ])
+
+    core_terms = _unique_keep_order((science_meta["user_phrases"] or []) + topic_terms[:6] + species_terms[:3])
+
+    market_queries = _unique_keep_order(
+        [
+            _build_text_query(species_terms[:3] + topic_terms[:5], extras=["market", "prices", "costs", "trade", "demand"]),
+            _build_text_query(species_terms[:3] + topic_terms[:5], extras=market_terms[:7]),
+            _build_text_query(species_terms[:3], extras=["feed costs", "raw materials", "production", "consumption", "retail"] + topic_terms[:4]),
+        ]
+    )
+
+    regulation_queries = _unique_keep_order(
+        [
+            _build_text_query(species_terms[:3] + topic_terms[:5], extras=["regulation", "legislation", "EFSA", "EUR-Lex", "BOE"]),
+            _build_text_query(species_terms[:3] + topic_terms[:5], extras=regulation_terms[:8]),
+        ]
+    )
+
+    official_google_queries = _unique_keep_order(
+        [
+            f"{regulation_queries[0]} site:boe.es" if regulation_queries else "",
+            f"{regulation_queries[0]} site:eur-lex.europa.eu" if regulation_queries else "",
+            f"{regulation_queries[0]} site:efsa.europa.eu" if regulation_queries else "",
+            f"{regulation_queries[0]} site:mapa.gob.es" if regulation_queries else "",
+        ]
+    )
+
+    raw_market_search = _build_text_query(core_terms[:6], extras=["market", "prices", "costs"])
+    raw_reg_search = _build_text_query(core_terms[:6], extras=["regulation", "EFSA", "EUR-Lex", "BOE"])
+
+    return {
+        "market": {
+            "queries": market_queries,
+            "expanded_terms": topic_terms,
+            "market_terms": market_terms,
+            "species_terms": species_terms,
+            "external_links": {
+                "Google News": f"https://news.google.com/search?q={quote_plus(raw_market_search)}",
+                "Google": f"https://www.google.com/search?q={quote_plus(raw_market_search)}",
+            },
+        },
+        "science": science_meta,
+        "regulation": {
+            "queries": regulation_queries,
+            "official_google_queries": official_google_queries,
+            "boe_terms": _unique_keep_order((science_meta["user_phrases"] or []) + topic_terms[:8] + [species]),
+            "expanded_terms": topic_terms,
+            "regulation_terms": regulation_terms,
+            "species_terms": species_terms,
+            "external_links": {
+                "EUR-Lex / Google": f"https://www.google.com/search?q={quote_plus(raw_reg_search + ' site:eur-lex.europa.eu')}",
+                "BOE / Google": f"https://www.google.com/search?q={quote_plus(raw_reg_search + ' site:boe.es')}",
+                "EFSA / Google": f"https://www.google.com/search?q={quote_plus(raw_reg_search + ' site:efsa.europa.eu')}",
+            },
+        },
+    }
+
+
+def _search_google_news_batch(queries: List[str], start_date: date, end_date: date, max_results: int) -> List[dict]:
+    collected: List[dict] = []
+    usable_queries = [q for q in queries if q][:3]
+    if not usable_queries:
+        return []
+    per_query = max(4, min(12, max_results + 2))
+    for query in usable_queries:
+        date_hint = f" after:{start_date.isoformat()} before:{(end_date + timedelta(days=1)).isoformat()}"
+        try:
+            collected.extend(search_google_news(query + date_hint, start_date, end_date, max_results=per_query))
+        except Exception:
+            continue
+    return _dedupe(collected)
+
+
+def _search_gdelt_batch(queries: List[str], start_date: date, end_date: date, max_results: int, domains: Optional[List[str]] = None) -> List[dict]:
+    collected: List[dict] = []
+    usable_queries = [q for q in queries if q][:3]
+    if not usable_queries:
+        return []
+    per_query = max(5, min(20, max_results + 4))
+    for query in usable_queries:
+        enriched_query = query
+        if domains:
+            domain_block = " OR ".join(f"domainis:{domain}" for domain in domains)
+            enriched_query = f"({query}) ({domain_block})"
+        try:
+            items = search_gdelt_articles(enriched_query, start_date, end_date, max_results=per_query)
+            collected.extend(items)
+            if not items and domains:
+                collected.extend(search_gdelt_articles(query, start_date, end_date, max_results=per_query))
+        except Exception:
+            continue
+    return _dedupe(collected)
+
+
+def _score_generic_record(item: dict, species_terms: List[str], topic_terms: List[str], category_terms: List[str], mode: str) -> float:
+    haystack = _normalize(
+        " ".join(
+            filter(
+                None,
+                [
+                    item.get("title", ""),
+                    item.get("snippet", ""),
+                    item.get("source", ""),
+                    item.get("url", ""),
+                    item.get("source_db", ""),
+                ],
+            )
+        )
+    )
+    score = 0.0
+
+    species_hits = 0
+    for term in species_terms:
+        norm = _normalize(term)
+        if norm and norm in haystack:
+            species_hits += 1
+            score += 1.5 if " " in norm else 0.8
+
+    topic_hits = 0
+    for term in topic_terms:
+        norm = _normalize(term)
+        if norm and norm in haystack:
+            topic_hits += 1
+            score += 2.0 if " " in norm else 1.0
+
+    for term in category_terms:
+        norm = _normalize(term)
+        if norm and norm in haystack:
+            score += 0.4
+
+    url = (item.get("url") or "").lower()
+    domain = urlparse(url).netloc.lower()
+
+    if item.get("url"):
+        score += 0.25
+
+    source_db = item.get("source_db", "")
+    if mode == "market":
+        if source_db == "GDELT":
+            score += 0.9
+        elif source_db == "Google News":
+            score += 0.5
+        if any(token in haystack for token in ["price", "prices", "cost", "costs", "market", "trade", "export", "import", "consumption"]):
+            score += 0.8
+    elif mode == "regulation":
+        if source_db == "BOE API":
+            score += 2.5
+        elif source_db == "GDELT":
+            score += 0.8
+        if any(domain.endswith(official) or official in domain for official in OFFICIAL_REGULATORY_DOMAINS):
+            score += 1.6
+        if any(token in haystack for token in ["regulation", "legislation", "directive", "decision", "decree", "order", "norma", "normativa", "ley", "efsa", "eur-lex", "boe"]):
+            score += 1.0
+
+    published = _parse_date(item.get("published"))
+    if published:
+        age_days = max((datetime.now() - published).days, 0)
+        if age_days <= 30:
+            score += 1.0
+        elif age_days <= 90:
+            score += 0.6
+        elif age_days <= 365:
+            score += 0.2
+
+    if topic_terms and topic_hits == 0:
+        score -= 1.5
+    if species_hits == 0:
+        score -= 0.7
+
+    return score
+
+
+def _sort_generic_results(records: List[dict], meta: dict, mode: str) -> List[dict]:
+    species_terms = meta.get("species_terms", [])
+    topic_terms = meta.get("expanded_terms", [])
+    if mode == "market":
+        category_terms = meta.get("market_terms", [])
+    else:
+        category_terms = meta.get("regulation_terms", [])
+
+    enriched = []
+    for item in records:
+        current = dict(item)
+        current["score"] = _score_generic_record(current, species_terms, topic_terms, category_terms, mode)
+        enriched.append(current)
+
+    enriched.sort(key=lambda item: (item.get("score", 0), item.get("published", "")), reverse=True)
+    return enriched
+
+
+def search_market_sources(market_meta: dict, start_date: date, end_date: date, max_results: int = 10) -> List[dict]:
+    collected: List[dict] = []
+    queries = market_meta.get("queries", [])
+
+    collected.extend(_search_google_news_batch(queries[:2], start_date, end_date, max_results=max_results))
+    collected.extend(_search_gdelt_batch(queries[:2], start_date, end_date, max_results=max_results))
+
+    deduped = _dedupe(collected)
+    ranked = _sort_generic_results(deduped, market_meta, "market")
+    filtered = [item for item in ranked if item.get("score", 0) >= 0.2]
+    if not filtered:
+        filtered = ranked
+    return filtered[:max_results]
+
+
+def search_regulatory_sources(reg_meta: dict, start_date: date, end_date: date, max_results: int = 10) -> List[dict]:
+    collected: List[dict] = []
+
+    boe_terms = tuple(reg_meta.get("boe_terms", [])[:8])
+    try:
+        collected.extend(search_boe_legislation(boe_terms, start_date, end_date, max_results=max_results))
+    except Exception:
+        pass
+
+    collected.extend(_search_gdelt_batch(reg_meta.get("queries", [])[:2], start_date, end_date, max_results=max_results, domains=OFFICIAL_REGULATORY_DOMAINS))
+    collected.extend(_search_google_news_batch(reg_meta.get("official_google_queries", [])[:3], start_date, end_date, max_results=max_results))
+    collected.extend(_search_google_news_batch(reg_meta.get("queries", [])[:1], start_date, end_date, max_results=max_results))
+
+    deduped = _dedupe(collected)
+    ranked = _sort_generic_results(deduped, reg_meta, "regulation")
+    filtered = [item for item in ranked if item.get("score", 0) >= 0.2]
+    if not filtered:
+        filtered = ranked
+    return filtered[:max_results]
+
+
+def run_search(species: str, user_keywords: str, start_date: date, end_date: date, max_results: int) -> Tuple[Dict[str, List[dict]], Dict[str, object]]:
+    queries = build_queries(species, user_keywords)
+    results = {"market": [], "science": [], "regulation": []}
+
+    results["market"] = search_market_sources(queries["market"], start_date, end_date, max_results=max_results)
+    results["science"] = search_scientific_sources(queries["science"], start_date, end_date, max_results=max_results)
+    results["regulation"] = search_regulatory_sources(queries["regulation"], start_date, end_date, max_results=max_results)
+
+    return results, queries
+
+
+def bibliography_entries(results: Dict[str, List[dict]]) -> List[str]:
+    entries = []
+    for item in flatten_results(results):
+        published = item.get("published", "")[:10] if item.get("published") else "s/f"
+        url = item.get("url", "")
+        if item.get("category") == CATEGORY_LABELS["science"]:
+            authors = item.get("authors", "Autoría no disponible")
+            journal = item.get("journal") or item.get("source", "Fuente científica")
+            doi_or_url = item.get("doi") or url
+            source_db = item.get("source_db", "")
+            entry = f"{authors}. ({published}). {item.get('title')}. {journal}. {doi_or_url} [{source_db}]"
+        else:
+            entry = f"{item.get('source', 'Fuente no indicada')}. ({published}). {item.get('title')}. {url}"
+        entries.append(entry)
+    return entries
+
+
+def results_dataframe(items: List[dict]) -> pd.DataFrame:
+    if not items:
+        return pd.DataFrame(columns=["Fecha", "Base", "Fuente", "Título", "Resumen", "URL"])
+    rows = []
+    for item in items:
+        rows.append(
+            {
+                "Fecha": item.get("published", "")[:10],
+                "Base": item.get("source_db", ""),
+                "Fuente": item.get("source", ""),
+                "Título": item.get("title", ""),
+                "Resumen": item.get("snippet", ""),
+                "URL": item.get("url", ""),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def render_category_table(items: List[dict], label: str) -> None:
+    st.subheader(label)
+    if not items:
+        st.info("Sin resultados con los filtros actuales.")
+        return
+
+    for idx, item in enumerate(items, start=1):
+        title = item.get("title", "Sin título")
+        url = item.get("url", "")
+        source = item.get("source", "Fuente no indicada")
+        published = item.get("published", "")[:10] or "s/f"
+        source_db = item.get("source_db", "")
+        snippet = item.get("snippet", "")
+
+        if url:
+            st.markdown(f"**{idx}. [{title}]({url})**")
+        else:
+            st.markdown(f"**{idx}. {title}**")
+        st.caption(f"{source} · {published} · {source_db}")
+        if snippet:
+            st.write(snippet)
+        if url:
+            st.markdown(f"[Abrir fuente]({url})")
+        st.markdown("---")
+
+    with st.expander("Vista tabular con enlaces"):
+        df = results_dataframe(items)
+        try:
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={"URL": st.column_config.LinkColumn("URL", display_text="Abrir")},
+            )
+        except Exception:
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def render_science_debug(query_meta: Optional[dict]) -> None:
+    if not query_meta:
+        return
+    science = query_meta.get("science", {})
+    with st.expander("Cómo se ha ampliado la búsqueda científica"):
+        user_phrases = science.get("user_phrases", [])
+        expanded_terms = science.get("expanded_terms", [])
+        queries = science.get("queries", {})
+
+        st.markdown("**Entrada del usuario**")
+        st.write(", ".join(user_phrases) if user_phrases else "Sin palabras clave específicas; se han usado términos técnicos por defecto del segmento.")
+
+        st.markdown("**Términos ampliados automáticamente**")
+        st.write(", ".join(expanded_terms[:20]) if expanded_terms else "Sin ampliaciones.")
+
+        st.markdown("**Consultas científicas generadas**")
+        st.code(
+            f"OpenAlex: {queries.get('openalex', '')}\n\n"
+            f"Europe PMC: {queries.get('europepmc', '')}\n\n"
+            f"Crossref/Semantic Scholar: {queries.get('crossref', '')}",
+            language="text",
+        )
+
+        links = science.get("external_links", {})
+        if links:
+            st.markdown("**Atajos externos**")
+            for name, url in links.items():
+                st.markdown(f"- [{name}]({url})")
+
+
+def render_market_debug(query_meta: Optional[dict]) -> None:
+    if not query_meta:
+        return
+    market = query_meta.get("market", {})
+    with st.expander("Cómo se ha construido la búsqueda de mercado"):
+        st.markdown("**Términos ampliados**")
+        st.write(", ".join(market.get("expanded_terms", [])[:20]) or "Sin ampliación específica.")
+
+        st.markdown("**Consultas ejecutadas**")
+        for query in market.get("queries", []):
+            st.code(query, language="text")
+
+        links = market.get("external_links", {})
+        if links:
+            st.markdown("**Atajos externos**")
+            for name, url in links.items():
+                st.markdown(f"- [{name}]({url})")
+
+
+
+def render_regulatory_debug(query_meta: Optional[dict]) -> None:
+    if not query_meta:
+        return
+    regulation = query_meta.get("regulation", {})
+    with st.expander("Cómo se ha construido la búsqueda regulatoria"):
+        st.markdown("**Términos ampliados**")
+        st.write(", ".join(regulation.get("expanded_terms", [])[:20]) or "Sin ampliación específica.")
+
+        st.markdown("**Consultas ejecutadas**")
+        for query in regulation.get("queries", []):
+            st.code(query, language="text")
+        if regulation.get("boe_terms"):
+            st.markdown("**Términos enviados a la API del BOE**")
+            st.write(", ".join(regulation.get("boe_terms", [])[:12]))
+
+        links = regulation.get("external_links", {})
+        if links:
+            st.markdown("**Atajos externos**")
+            for name, url in links.items():
+                st.markdown(f"- [{name}]({url})")
+
+
+def main() -> None:
+    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    init_state()
+
+    st.title(APP_TITLE)
+    st.caption(
+        "Radar de mercado, evidencia científico-técnica y vigilancia regulatoria para especies de interés. "
+        "La app prioriza enlaces directos a las fuentes recuperadas y combina varias búsquedas para no quedarse solo en una única base."
+    )
+
+    with st.sidebar:
+        st.header("Filtros")
+        species = st.selectbox("Especie / segmento", list(SPECIES_OPTIONS.keys()))
+        today = date.today()
+        default_start = today - timedelta(days=180)
+        start_date = st.date_input("Fecha inicio", value=default_start)
+        end_date = st.date_input("Fecha fin", value=today)
+        user_keywords = st.text_input(
+            "Palabras clave",
+            placeholder="Ej.: peste porcina africana, metano, precios leche, influenza aviar...",
+        )
+        max_results = st.slider("Máximo de resultados por bloque", min_value=5, max_value=25, value=12, step=1)
+        company_context = st.text_area("Contexto corporativo / criterios de recomendación", value=DEFAULT_COMPANY_CONTEXT, height=190)
+        run_button = st.button("Buscar y actualizar radar", use_container_width=True)
+        generate_button = st.button("Generar briefing", use_container_width=True)
+
+    if start_date > end_date:
+        st.error("La fecha inicial no puede ser posterior a la fecha final.")
+        return
+
+    if run_button:
+        with st.spinner("Recuperando fuentes..."):
+            try:
+                results, queries = run_search(species, user_keywords, start_date, end_date, max_results)
+                st.session_state.search_results = results
+                st.session_state.query_meta = queries
+                st.session_state.last_filters = {
+                    "species": species,
+                    "keywords": user_keywords,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "company_context": company_context,
+                }
+                st.session_state.brief_text = ""
+                st.session_state.chat_history = []
+                st.success("Radar actualizado.")
+            except Exception as exc:
+                st.error(f"No se pudo completar la búsqueda: {exc}")
+
+    results = st.session_state.search_results
+    query_meta = st.session_state.query_meta
+
+    if results:
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Mercado", len(results.get("market", [])))
+        col2.metric("Científico-técnico", len(results.get("science", [])))
+        col3.metric("Regulación", len(results.get("regulation", [])))
+
+        tab_market, tab_science, tab_reg, tab_chat, tab_brief = st.tabs(
+            ["Mercado", "Científico-técnico", "Legislación", "Chat", "Briefing e informe"]
+        )
+
+        with tab_market:
+            render_market_debug(query_meta)
+            render_category_table(results.get("market", []), "Señales de mercado")
+
+        with tab_science:
+            render_science_debug(query_meta)
+            render_category_table(results.get("science", []), "Evidencia científico-técnica")
+
+        with tab_reg:
+            render_regulatory_debug(query_meta)
+            render_category_table(results.get("regulation", []), "Vigilancia regulatoria")
+
+        with tab_chat:
+            st.write("Usa este chat para afinar el enfoque antes de generar el informe final.")
+            for message in st.session_state.chat_history:
+                with st.chat_message("assistant" if message["role"] == "assistant" else "user"):
+                    st.markdown(message["content"])
+
+            question = st.chat_input("Haz una pregunta sobre los resultados recuperados")
+            if question:
+                st.session_state.chat_history.append({"role": "user", "content": question})
+                with st.chat_message("user"):
+                    st.markdown(question)
+                with st.chat_message("assistant"):
+                    with st.spinner("Analizando contexto..."):
+                        answer = answer_chat(
+                            question,
+                            species,
+                            user_keywords,
+                            results,
+                            company_context,
+                            st.session_state.chat_history,
+                        )
+                        st.markdown(answer)
+                st.session_state.chat_history.append({"role": "assistant", "content": answer})
+
+        with tab_brief:
+            if generate_button:
+                with st.spinner("Generando briefing..."):
+                    try:
+                        brief_text = generate_brief(
+                            species,
+                            user_keywords,
+                            results,
+                            company_context,
+                            st.session_state.chat_history,
+                            query_meta=query_meta,
+                        )
+                        st.session_state.brief_text = brief_text
+                    except Exception as exc:
+                        st.error(f"No se pudo generar el briefing: {exc}")
+
+            if st.session_state.brief_text:
+                st.markdown(st.session_state.brief_text)
+
+                docx_bytes = build_docx_bytes(
+                    species,
+                    user_keywords,
+                    start_date,
+                    end_date,
+                    company_context,
+                    st.session_state.brief_text,
+                    results,
+                )
+                st.download_button(
+                    label="Descargar informe Word (.docx)",
+                    data=docx_bytes,
+                    file_name=f"radar_{species.lower().replace(' ', '_')}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+
+                with st.expander("Referencias bibliográficas / documentales"):
+                    for item in flatten_results(results):
+                        title = item.get("title", "Sin título")
+                        url = item.get("url", "")
+                        published = item.get("published", "")[:10] or "s/f"
+                        source = item.get("source", "Fuente")
+                        if url:
+                            st.markdown(f"- [{title}]({url}) — {source} ({published})")
+                        else:
+                            st.markdown(f"- {title} — {source} ({published})")
             else:
                 st.info("Primero ejecuta la búsqueda y luego genera el briefing.")
 
