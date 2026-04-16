@@ -5,7 +5,7 @@ import re
 import time
 import unicodedata
 from collections import Counter
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote_plus, urljoin, urlparse
 
@@ -281,13 +281,21 @@ def _date_in_range(value: Optional[datetime], start: date, end: date) -> bool:
     return start <= current <= end
 
 
+def _normalize_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is not None and value.utcoffset() is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
 def _parse_date(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     try:
-        return date_parser.parse(value)
+        return _normalize_datetime(date_parser.parse(value))
     except Exception:
-        return _parse_spanish_date(value)
+        return _normalize_datetime(_parse_spanish_date(value))
 
 
 def _parse_spanish_date(text: str) -> Optional[datetime]:
