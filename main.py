@@ -1,475 +1,445 @@
-from __future__ import annotations
-
 import io
 import os
 import re
-import time
-import unicodedata
-import zipfile
 from collections import Counter
 from datetime import date, datetime, timezone
-from html import unescape
-from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
-from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
+from typing import Dict, List, Optional, Sequence
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import feedparser
+import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 from docx import Document
 
-APP_TITLE = "Nutreco Iberia | Radar sectorial de mercado"
-USER_AGENT = "Mozilla/5.0 (compatible; NutrecoRadar/6.0; +https://streamlit.io)"
-REQUEST_TIMEOUT = 18
-DEFAULT_MAX_RESULTS = 12
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover
+    OpenAI = None
+
+
+APP_TITLE = "Nutreco Iberia | Radar de necesidades del mercado"
+USER_AGENT = "Mozilla/5.0 (compatible; NutrecoRadar/2.0; +https://streamlit.io)"
+REQUEST_TIMEOUT = 20
+DEFAULT_COMPANY_CONTEXT = """Objetivo del radar:
+- Leer necesidades del mercado para orientar productos, servicios y soluciones de Nutreco Iberia.
+- Detectar señales comerciales, técnicas y regulatorias que puedan traducirse en innovación, soporte técnico o argumentario de valor.
+- Priorizar oportunidades accionables y riesgos que afecten a posicionamiento, portafolio o claims.
+"""
+
+MARKET_NEWS_SITES = [
+    "mapa.gob.es",
+    "agroinformacion.com",
+    "eurocarne.com",
+    "diarioveterinario.com",
+    "interempresas.net",
+    "agrodigital.com",
+    "animal-health-media.com",
+]
+OFFICIAL_REG_DOMAINS = [
+    "boe.es",
+    "eur-lex.europa.eu",
+    "mapa.gob.es",
+    "aesan.gob.es",
+    "efsa.europa.eu",
+    "miteco.gob.es",
+    "sanidad.gob.es",
+    "europa.eu",
+]
+SCIENCE_HINTS = {
+    "study",
+    "review",
+    "trial",
+    "journal",
+    "effect",
+    "effects",
+    "performance",
+    "animals",
+    "animal",
+    "feed",
+    "nutrition",
+    "dairy",
+    "swine",
+    "pig",
+    "broiler",
+    "laying",
+    "ruminant",
+    "sheep",
+    "goat",
+    "cattle",
+    "rabbit",
+}
+STOPWORDS = {
+    "de", "la", "el", "los", "las", "y", "o", "u", "en", "por", "para", "con", "sin", "del", "al", "a",
+    "the", "and", "for", "with", "from", "into", "this", "that", "animal", "animals", "market", "news",
+    "regulation", "science", "technical", "sector", "ganaderia", "ganadería", "livestock", "production",
+}
+
+SPECIES_PROFILES: Dict[str, Dict[str, List[str]]] = {
+    "All species": {
+        "aliases": ["ganadería", "livestock", "animal production", "farm animals", "ruminants", "poultry", "swine", "rabbit"],
+        "market_aliases": ["ganadería", "livestock", "alimentación animal", "animal nutrition", "feed sector"],
+        "science_aliases": ["livestock", "animal nutrition", "animal production", "farm animals"],
+        "reg_aliases": ["ganadería", "alimentación animal", "livestock", "animal health", "animal welfare"],
+    },
+    "Alimentación animal": {
+        "aliases": ["alimentación animal", "animal nutrition", "feed", "compound feed", "feed industry", "piensos"],
+        "market_aliases": ["alimentación animal", "piensos", "feed sector", "feed industry", "compound feed"],
+        "science_aliases": ["animal nutrition", "feed", "feed additives", "compound feed", "animal feeding"],
+        "reg_aliases": ["feed", "piensos", "alimentación animal", "feed hygiene", "feed additives", "compound feed"],
+    },
+    "Avicultura de puesta": {
+        "aliases": ["avicultura de puesta", "gallinas ponedoras", "layers", "laying hens", "egg production"],
+        "market_aliases": ["gallinas ponedoras", "layers", "huevo", "egg market", "egg production"],
+        "science_aliases": ["laying hens", "layers", "egg production", "egg quality"],
+        "reg_aliases": ["laying hens", "gallinas ponedoras", "huevo", "egg marketing"],
+    },
+    "Avicultura de carne": {
+        "aliases": ["avicultura de carne", "pollos de engorde", "broilers", "broiler production", "meat poultry"],
+        "market_aliases": ["broilers", "pollo", "broiler market", "pollos de engorde"],
+        "science_aliases": ["broilers", "broiler production", "pollo de engorde", "broiler nutrition"],
+        "reg_aliases": ["broilers", "pollos de engorde", "avicultura de carne", "broiler welfare"],
+    },
+    "Porcino": {
+        "aliases": ["porcino", "swine", "pig", "pig production", "cerdo"],
+        "market_aliases": ["porcino", "cerdo", "swine market", "pig market"],
+        "science_aliases": ["swine", "pig", "piglets", "sows", "porcine"],
+        "reg_aliases": ["porcino", "cerdo", "swine", "porcine"],
+    },
+    "Vacuno de leche": {
+        "aliases": ["vacuno de leche", "dairy cattle", "dairy cows", "lechero", "milk production"],
+        "market_aliases": ["vacuno de leche", "leche", "dairy market", "dairy cows"],
+        "science_aliases": ["dairy cows", "dairy cattle", "transition cows", "milk yield"],
+        "reg_aliases": ["vacuno de leche", "dairy cows", "milk production", "dairy sector"],
+    },
+    "Vacuno de carne": {
+        "aliases": ["vacuno de carne", "beef cattle", "beef production", "cebo", "beef"],
+        "market_aliases": ["vacuno de carne", "beef cattle", "beef market", "beef"],
+        "science_aliases": ["beef cattle", "beef production", "feedlot", "growing-finishing cattle"],
+        "reg_aliases": ["vacuno de carne", "beef cattle", "beef", "bovine"],
+    },
+    "Ovino": {
+        "aliases": ["ovino", "sheep", "lamb", "sheep production", "cordero"],
+        "market_aliases": ["ovino", "cordero", "sheep market", "lamb market"],
+        "science_aliases": ["sheep", "lamb", "ewes", "small ruminants"],
+        "reg_aliases": ["ovino", "sheep", "lamb", "small ruminants"],
+    },
+    "Caprino": {
+        "aliases": ["caprino", "goat", "goats", "goat production", "leche caprina"],
+        "market_aliases": ["caprino", "goat", "goat market", "leche caprina"],
+        "science_aliases": ["goat", "goats", "dairy goats", "small ruminants"],
+        "reg_aliases": ["caprino", "goat", "goats", "small ruminants"],
+    },
+    "Cunicultura": {
+        "aliases": ["cunicultura", "rabbit", "rabbits", "rabbit production", "conejo"],
+        "market_aliases": ["conejo", "rabbit market", "cunicultura", "rabbit production"],
+        "science_aliases": ["rabbit", "rabbits", "cuniculture", "rabbit nutrition"],
+        "reg_aliases": ["cunicultura", "rabbit", "rabbits", "conejo"],
+    },
+}
 
 CATEGORY_LABELS = {
-    "market": "Mercado",
+    "market": "Mercado y noticias",
     "science": "Científico-técnico",
     "regulation": "Legislación y regulación",
 }
 
-DEFAULT_COMPANY_CONTEXT = """Objetivo del radar:
-- Detectar necesidades del mercado antes que el cliente las verbalice.
-- Traducir señales de prensa, ciencia y regulación a oportunidades de producto, servicio y argumentario.
-- Priorizar implicaciones accionables para Nutreco Iberia.
-"""
-
-MAPA_NEWS_RSS_URL = "https://www.mapa.gob.es/es/prensa/noticiasrss"
-MAPA_MARKETS_URL = "https://www.mapa.gob.es/es/ganaderia/estadisticas/mercados_agricolas_ganaderos"
-MAPA_LEGISLATION_URL = "https://www.mapa.gob.es/es/ganaderia/legislacion"
-DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
-
-MARKET_MEDIA_DOMAINS = [
-    "mapa.gob.es",
-    "efeagro.com",
-    "agrodigital.com",
-    "interempresas.net",
-    "avicultura.com",
-    "porcino.info",
-    "vacapinta.com",
-    "eurocarne.com",
+MARKET_TOPIC_ITEMS = [
+    {"label": "Precios y cotizaciones", "terms": ["precios", "cotizaciones", "price", "market prices"]},
+    {"label": "Boletines oficiales de precios", "terms": ["boletín de precios", "precios semanales", "cotizaciones oficiales", "mercados agrarios"]},
+    {"label": "Coste del pienso", "terms": ["coste del pienso", "feed cost", "piensos", "compound feed prices"]},
+    {"label": "Materias primas y piensos", "terms": ["materias primas", "piensos", "feed materials", "compound feed"]},
+    {"label": "Cereales y energía", "terms": ["cereales", "maíz", "trigo", "barley", "grain prices"]},
+    {"label": "Harina de soja y proteínas", "terms": ["soja", "soybean meal", "protein meals", "oleaginosas"]},
+    {"label": "Aceites y grasas", "terms": ["aceites", "grasas", "fats and oils", "oleínas"]},
+    {"label": "Aditivos y especialidades", "terms": ["aditivos", "especialidades", "feed additives", "specialties"]},
+    {"label": "Rentabilidad y márgenes", "terms": ["rentabilidad", "márgenes", "profitability", "margins"]},
+    {"label": "Coste energético", "terms": ["energía", "electricidad", "gas", "energy costs"]},
+    {"label": "Inflación alimentaria", "terms": ["inflación alimentaria", "food inflation", "consumer prices"]},
+    {"label": "Consumo interior", "terms": ["consumo", "demanda interna", "domestic demand", "consumption"]},
+    {"label": "Tendencias del consumidor", "terms": ["consumer trends", "tendencias del consumidor", "shopper", "market demand"]},
+    {"label": "Retail y gran distribución", "terms": ["retail", "gran distribución", "supermercados", "modern trade"]},
+    {"label": "Canal horeca y foodservice", "terms": ["horeca", "foodservice", "restauración", "catering"]},
+    {"label": "Exportación", "terms": ["exportación", "exports", "overseas sales", "trade"]},
+    {"label": "Importación", "terms": ["importación", "imports", "trade flows", "sourcing"]},
+    {"label": "Comercio internacional", "terms": ["comercio internacional", "international trade", "global market", "trade flows"]},
+    {"label": "Aranceles y barreras comerciales", "terms": ["aranceles", "trade barriers", "customs", "restricciones comerciales"]},
+    {"label": "Logística y transporte", "terms": ["logística", "transporte", "freight", "shipping"]},
+    {"label": "Sacrificio y mataderos", "terms": ["mataderos", "sacrificio", "slaughter", "abattoirs"]},
+    {"label": "Producción sectorial", "terms": ["producción", "output", "sector production", "supply"]},
+    {"label": "Censo y capacidad productiva", "terms": ["censo", "inventario ganadero", "herd size", "flock size"]},
+    {"label": "Disponibilidad de animales", "terms": ["disponibilidad de animales", "placements", "animal supply", "reposiciones"]},
+    {"label": "Noticias del MAPA y del sector", "terms": ["MAPA", "ministerio de agricultura", "sector news", "ganadería noticias"]},
+    {"label": "Coyuntura agraria", "terms": ["coyuntura", "agrarian outlook", "market outlook", "situación de mercado"]},
+    {"label": "Boletines lácteos", "terms": ["boletín lácteo", "precio leche", "dairy bulletin", "milk market"]},
+    {"label": "Boletines cárnicos", "terms": ["boletín cárnico", "carne", "meat market", "meat bulletin"]},
+    {"label": "Precio de la leche", "terms": ["precio leche", "milk price", "farmgate milk", "dairy prices"]},
+    {"label": "Precio del cerdo", "terms": ["precio cerdo", "pig price", "hog prices", "porcino precios"]},
+    {"label": "Precio del pollo", "terms": ["precio pollo", "broiler price", "poultry prices", "pollo mercado"]},
+    {"label": "Precio del huevo", "terms": ["precio huevo", "egg price", "egg market", "cotización huevo"]},
+    {"label": "Precio del vacuno", "terms": ["precio vacuno", "beef price", "cattle prices", "vacuno mercado"]},
+    {"label": "Precio del cordero", "terms": ["precio cordero", "lamb price", "ovine market", "cordero mercado"]},
+    {"label": "Precio del conejo", "terms": ["precio conejo", "rabbit price", "cunicultura mercado", "conejo mercado"]},
+    {"label": "Precio de leche de cabra", "terms": ["precio leche cabra", "goat milk price", "caprino mercado", "leche caprina precio"]},
+    {"label": "Calidad percibida y valor", "terms": ["calidad", "value perception", "consumer value", "premium quality"]},
+    {"label": "Bienestar animal como driver de mercado", "terms": ["bienestar animal", "welfare demand", "consumer welfare", "animal welfare market"]},
+    {"label": "Sostenibilidad como driver de compra", "terms": ["sostenibilidad", "sustainable demand", "low carbon", "green demand"]},
+    {"label": "Huella de carbono de producto", "terms": ["huella de carbono", "carbon footprint", "scope 3", "low carbon"]},
+    {"label": "Certificaciones y sellos", "terms": ["certificaciones", "sellos", "certification", "quality label"]},
+    {"label": "Producto premium", "terms": ["premium", "high value", "specialty", "valor añadido"]},
+    {"label": "Segmento económico y commodity", "terms": ["commodity", "económico", "value segment", "precio bajo"]},
+    {"label": "Bioseguridad con impacto de mercado", "terms": ["bioseguridad", "disease impact market", "trade restrictions", "market impact"]},
+    {"label": "Enfermedades y restricciones comerciales", "terms": ["restricciones comerciales", "sanidad animal", "disease outbreak", "trade ban"]},
+    {"label": "Resistencia del consumidor a antibióticos", "terms": ["antibióticos", "antibiotic free", "raised without antibiotics", "consumer concern"]},
+    {"label": "Innovación de producto", "terms": ["innovación", "product innovation", "new solutions", "launch"]},
+    {"label": "Ingredientes funcionales", "terms": ["ingredientes funcionales", "functional ingredients", "specialty feed", "health solutions"]},
+    {"label": "Proteínas alternativas", "terms": ["proteínas alternativas", "alternative proteins", "insect meal", "novel feeds"]},
+    {"label": "Digitalización y datos en granja", "terms": ["digitalización", "data", "precision farming", "sensors"]},
+    {"label": "Financiación e inversión", "terms": ["inversión", "financiación", "capex", "farm investment"]},
+    {"label": "Fusiones y adquisiciones", "terms": ["adquisiciones", "fusiones", "mergers", "acquisition"]},
+    {"label": "Empleo y relevo generacional", "terms": ["empleo", "relevo generacional", "labour", "farm succession"]},
+    {"label": "Seguros y gestión del riesgo", "terms": ["seguros", "risk management", "insurance", "volatility"]},
+    {"label": "Disponibilidad de agua", "terms": ["agua", "water availability", "drought", "water stress"]},
+    {"label": "Clima y eventos extremos", "terms": ["clima", "heat waves", "drought", "extreme weather"]},
+    {"label": "Compras públicas y comedor colectivo", "terms": ["compras públicas", "public procurement", "school meals", "institutional demand"]},
 ]
 
-OFFICIAL_REGULATORY_DOMAINS = {
-    "boe.es",
-    "www.boe.es",
-    "eur-lex.europa.eu",
-    "mapa.gob.es",
-    "www.mapa.gob.es",
-    "aesan.gob.es",
-    "www.aesan.gob.es",
-    "efsa.europa.eu",
-    "www.efsa.europa.eu",
-    "sanidad.gob.es",
-    "www.sanidad.gob.es",
-    "miteco.gob.es",
-    "www.miteco.gob.es",
-}
-
-LEGAL_ANCHORS = [
-    "reglamento",
-    "regulation",
-    "real decreto",
-    "ley",
-    "orden",
-    "resolucion",
-    "resolución",
-    "directiva",
-    "directive",
-    "decision",
-    "decisión",
-    "normativa",
-    "legislacion",
-    "legislation",
-    "boe",
-    "eur-lex",
-    "regulatory",
-    "wellfare",
-    "welfare",
-    "sanidad animal",
-    "trazabilidad",
-    "animal health law",
-    "etiquetado",
+SCIENCE_TOPIC_ITEMS = [
+    {"label": "Nutrición y formulación", "terms": ["nutrition", "nutrición", "formulation", "diet"]},
+    {"label": "Eficiencia alimentaria e índice de conversión", "terms": ["feed efficiency", "feed conversion", "índice de conversión", "FCR"]},
+    {"label": "Consumo voluntario e ingestión", "terms": ["feed intake", "ingestión", "voluntary intake", "appetite"]},
+    {"label": "Salud intestinal", "terms": ["gut health", "salud intestinal", "intestinal integrity", "microbiota"]},
+    {"label": "Microbiota y moduladores", "terms": ["microbiota", "microbiome", "microbial modulation", "intestinal microbiota"]},
+    {"label": "Probióticos", "terms": ["probiotics", "probióticos", "direct fed microbials", "beneficial bacteria"]},
+    {"label": "Prebióticos", "terms": ["prebiotics", "prebióticos", "oligosaccharides", "mannan"]},
+    {"label": "Simbióticos", "terms": ["synbiotics", "simbióticos", "combined probiotic prebiotic", "microbiota support"]},
+    {"label": "Ácidos orgánicos", "terms": ["organic acids", "ácidos orgánicos", "acidifiers", "acidification"]},
+    {"label": "Fitogénicos y aceites esenciales", "terms": ["phytogenics", "fitogénicos", "essential oils", "plant extracts"]},
+    {"label": "Enzimas", "terms": ["enzymes", "enzimas", "phytase", "xylanase"]},
+    {"label": "Minerales y oligoelementos", "terms": ["minerals", "trace minerals", "oligoelementos", "microminerals"]},
+    {"label": "Vitaminas", "terms": ["vitamins", "vitaminas", "fat-soluble vitamins", "supplementation"]},
+    {"label": "Aminoácidos", "terms": ["amino acids", "aminoácidos", "lysine", "methionine"]},
+    {"label": "Proteína y aminoácidos ideales", "terms": ["ideal protein", "protein reduction", "amino acid balance", "low protein diet"]},
+    {"label": "Fibra y estructura de la dieta", "terms": ["fiber", "fibra", "diet structure", "physically effective fiber"]},
+    {"label": "Grasa y energía neta", "terms": ["fat supplementation", "energy density", "net energy", "dietary fat"]},
+    {"label": "Micotoxinas", "terms": ["mycotoxins", "micotoxinas", "aflatoxin", "deoxynivalenol"]},
+    {"label": "Calidad del agua", "terms": ["water quality", "calidad del agua", "drinking water", "water sanitation"]},
+    {"label": "Bioseguridad y prevención", "terms": ["biosecurity", "bioseguridad", "prevention", "farm hygiene"]},
+    {"label": "Reducción de antimicrobianos", "terms": ["antimicrobial reduction", "uso prudente", "antibiotic reduction", "AMR"]},
+    {"label": "Vacunación e inmunidad", "terms": ["vaccination", "vacunación", "immunity", "immune response"]},
+    {"label": "Estrés térmico", "terms": ["heat stress", "estrés térmico", "thermal stress", "cooling"]},
+    {"label": "Bienestar animal", "terms": ["animal welfare", "bienestar animal", "behavior", "housing"]},
+    {"label": "Sostenibilidad y eficiencia ambiental", "terms": ["sustainability", "environmental efficiency", "life cycle", "LCA"]},
+    {"label": "Metano y huella de carbono", "terms": ["methane", "metano", "carbon footprint", "greenhouse gas"]},
+    {"label": "Excreción de nitrógeno y fósforo", "terms": ["nitrogen excretion", "phosphorus excretion", "manure nutrients", "nutrient excretion"]},
+    {"label": "Salud ruminal", "terms": ["rumen health", "salud ruminal", "ruminal fermentation", "rumen function"]},
+    {"label": "Silajes y conservación de forrajes", "terms": ["silage", "ensilado", "forage preservation", "silage quality"]},
+    {"label": "Digestibilidad y calidad del forraje", "terms": ["digestibility", "forage quality", "NDF", "digestibilidad"]},
+    {"label": "Transición y posparto", "terms": ["transition cows", "posparto", "fresh cows", "transition period"]},
+    {"label": "Cetosis y balance energético", "terms": ["ketosis", "negative energy balance", "BHB", "energy balance"]},
+    {"label": "Acidosis", "terms": ["acidosis", "subacute ruminal acidosis", "SARA", "ruminal acidosis"]},
+    {"label": "Mastitis y calidad de leche", "terms": ["mastitis", "milk quality", "somatic cell count", "udder health"]},
+    {"label": "Reproducción y fertilidad", "terms": ["reproduction", "fertility", "reproductive performance", "estrus"]},
+    {"label": "Longevidad y vida productiva", "terms": ["longevity", "productive life", "survival", "stayability"]},
+    {"label": "Calostro e inmunidad neonatal", "terms": ["colostrum", "calostro", "passive immunity", "neonatal immunity"]},
+    {"label": "Cría y recría", "terms": ["rearing", "recría", "young stock", "growing animals"]},
+    {"label": "Destete y transición", "terms": ["weaning", "destete", "transition", "nursery"]},
+    {"label": "Vitalidad neonatal y supervivencia", "terms": ["neonatal survival", "piglet vitality", "calf vitality", "early mortality"]},
+    {"label": "Crecimiento y ganancia media diaria", "terms": ["growth", "average daily gain", "ADG", "performance"]},
+    {"label": "Calidad de canal y de carne", "terms": ["carcass quality", "meat quality", "canal", "yield"]},
+    {"label": "Calidad del huevo", "terms": ["egg quality", "shell quality", "albumen", "yolk"]},
+    {"label": "Persistencia de puesta", "terms": ["laying persistence", "persistencia de puesta", "egg mass", "layers performance"]},
+    {"label": "Eclosión e incubabilidad", "terms": ["hatchability", "incubability", "embryo development", "hatchery"]},
+    {"label": "Coccidiosis", "terms": ["coccidiosis", "Eimeria", "anticoccidial", "intestinal lesions"]},
+    {"label": "Salmonella", "terms": ["salmonella", "food safety", "preharvest control", "carrier state"]},
+    {"label": "Influenza aviar", "terms": ["avian influenza", "HPAI", "influenza aviar", "avian flu"]},
+    {"label": "Peste porcina africana", "terms": ["african swine fever", "ASF", "peste porcina africana", "ASFV"]},
+    {"label": "PRRS y otras enfermedades porcinas", "terms": ["PRRS", "porcine reproductive and respiratory syndrome", "porcine diseases", "circovirus"]},
+    {"label": "Lengua azul", "terms": ["bluetongue", "lengua azul", "vector-borne disease", "orbivirus"]},
+    {"label": "Parasitismo en pequeños rumiantes", "terms": ["parasites", "parasitismo", "helminths", "small ruminants"]},
+    {"label": "Enfermedades digestivas del conejo", "terms": ["rabbit enteropathy", "enteropatía", "rabbits", "digestive disorders"]},
+    {"label": "Sensores y ganadería de precisión", "terms": ["precision livestock farming", "sensors", "monitoring", "digital phenotyping"]},
+    {"label": "Modelos predictivos y datos", "terms": ["predictive models", "artificial intelligence", "machine learning", "decision support"]},
 ]
 
-MARKET_ANCHORS = [
-    "precio",
-    "precios",
-    "cotizacion",
-    "cotización",
-    "mercado",
-    "markets",
-    "market",
-    "boletin",
-    "boletín",
-    "noticia",
-    "sector",
-    "consumo",
-    "demanda",
-    "exportacion",
-    "exportación",
-    "importacion",
-    "importación",
-    "coste",
-    "costes",
-    "margen",
-    "márgenes",
-    "raw materials",
-    "feed costs",
-    "piensos",
+REG_TOPIC_ITEMS = [
+    {"label": "Bienestar animal", "terms": ["bienestar animal", "animal welfare", "welfare rules", "condiciones de cría"]},
+    {"label": "Bienestar en transporte", "terms": ["transporte animal", "animal transport", "transport welfare", "journey times"]},
+    {"label": "Bienestar en sacrificio", "terms": ["sacrificio", "slaughter welfare", "stunning", "matadero"]},
+    {"label": "Alojamiento y densidad", "terms": ["alojamiento", "stocking density", "housing requirements", "densidad"]},
+    {"label": "Bioseguridad y sanidad animal", "terms": ["bioseguridad", "animal health", "farm hygiene", "sanidad animal"]},
+    {"label": "Ley de Sanidad Animal de la UE", "terms": ["animal health law", "regulation 2016/429", "sanidad animal", "AHL"]},
+    {"label": "Notificación obligatoria de enfermedades", "terms": ["notificación obligatoria", "notifiable diseases", "disease reporting", "declaración obligatoria"]},
+    {"label": "Peste porcina africana", "terms": ["african swine fever", "ASF", "peste porcina africana", "regionalisation"]},
+    {"label": "Influenza aviar", "terms": ["avian influenza", "influenza aviar", "HPAI", "avian flu"]},
+    {"label": "Lengua azul", "terms": ["bluetongue", "lengua azul", "orbivirus", "movements"]},
+    {"label": "Salmonella y zoonosis", "terms": ["salmonella", "zoonosis", "control programmes", "food safety"]},
+    {"label": "Uso de antimicrobianos", "terms": ["antimicrobianos", "antimicrobials", "AMR", "prudent use"]},
+    {"label": "Medicamentos veterinarios", "terms": ["veterinary medicines", "medicamentos veterinarios", "regulation 2019/6", "prescripción"]},
+    {"label": "Piensos medicamentosos", "terms": ["medicated feed", "piensos medicamentosos", "regulation 2019/4", "carry-over"]},
+    {"label": "Higiene de los piensos", "terms": ["feed hygiene", "higiene de los piensos", "regulation 183/2005", "HACCP"]},
+    {"label": "Aditivos para alimentación animal", "terms": ["feed additives", "aditivos para piensos", "regulation 1831/2003", "authorisation"]},
+    {"label": "Etiquetado de piensos", "terms": ["feed labelling", "etiquetado de piensos", "regulation 767/2009", "claims"]},
+    {"label": "Materias primas para piensos", "terms": ["feed materials", "materias primas", "catalogue of feed materials", "raw materials"]},
+    {"label": "Contaminantes y residuos", "terms": ["contaminants", "residues", "contaminantes", "residuos"]},
+    {"label": "Micotoxinas y límites", "terms": ["mycotoxins", "micotoxinas", "guidance values", "DON"]},
+    {"label": "Dioxinas y PCB", "terms": ["dioxins", "PCB", "contaminants", "feed safety"]},
+    {"label": "Subproductos animales", "terms": ["animal by-products", "subproductos animales", "ABP", "Regulation 1069/2009"]},
+    {"label": "Trazabilidad", "terms": ["trazabilidad", "traceability", "batch identification", "food chain"]},
+    {"label": "Identificación y movimientos", "terms": ["movimientos", "animal identification", "traceability system", "movements"]},
+    {"label": "Controles oficiales", "terms": ["official controls", "controles oficiales", "regulation 2017/625", "inspections"]},
+    {"label": "Exportación y certificados sanitarios", "terms": ["export certificates", "certificados sanitarios", "third countries", "exports"]},
+    {"label": "Importación y controles fronterizos", "terms": ["import controls", "border control posts", "BCP", "imports"]},
+    {"label": "Producción ecológica", "terms": ["organic production", "producción ecológica", "organic livestock", "regulation 2018/848"]},
+    {"label": "Ganadería y nitratos", "terms": ["nitrates", "nitratos", "water protection", "manure management"]},
+    {"label": "Emisiones de amoniaco", "terms": ["ammonia emissions", "amoniaco", "air quality", "emissions"]},
+    {"label": "Metano y gases de efecto invernadero", "terms": ["methane", "metano", "GHG", "greenhouse gases"]},
+    {"label": "Autorizaciones ambientales", "terms": ["environmental permits", "autorización ambiental", "IPPC", "permits"]},
+    {"label": "Emisiones industriales", "terms": ["industrial emissions", "IED", "emisiones industriales", "BAT"]},
+    {"label": "Agua y vertidos", "terms": ["water", "discharges", "water framework", "vertidos"]},
+    {"label": "Gestión de estiércoles", "terms": ["manure", "gestión de estiércoles", "slurry", "digestate"]},
+    {"label": "Huella ambiental y reporting", "terms": ["environmental reporting", "sustainability reporting", "CSRD", "footprint"]},
+    {"label": "Declaraciones y claims ambientales", "terms": ["environmental claims", "green claims", "sustainability claims", "claims"]},
+    {"label": "Deforestación y materias primas importadas", "terms": ["deforestation", "EUDR", "soja", "imported raw materials"]},
+    {"label": "Seguridad alimentaria pre y posgranja", "terms": ["food safety", "farm to fork", "preharvest", "food chain"]},
+    {"label": "Huevos y normas de comercialización", "terms": ["egg marketing standards", "huevos", "egg labeling", "commercialisation"]},
+    {"label": "Leche cruda y calidad higiénica", "terms": ["raw milk", "milk hygiene", "somatic cells", "quality standards"]},
+    {"label": "Carne y requisitos de canal", "terms": ["meat hygiene", "carcass classification", "beef", "pork meat"]},
+    {"label": "Bienestar en porcino", "terms": ["pig welfare", "tail docking", "porcino", "enrichment"]},
+    {"label": "Bienestar en broilers", "terms": ["broiler welfare", "stocking density broilers", "pollos", "avicultura de carne"]},
+    {"label": "Bienestar en ponedoras", "terms": ["laying hens welfare", "ponedoras", "cages", "egg production"]},
+    {"label": "Bienestar en vacuno", "terms": ["cattle welfare", "bovine", "vacuno", "housing cattle"]},
+    {"label": "Bienestar en pequeños rumiantes", "terms": ["sheep welfare", "goat welfare", "small ruminants", "ovino caprino"]},
+    {"label": "Bienestar en conejos", "terms": ["rabbit welfare", "cunicultura", "rabbits", "housing rabbits"]},
+    {"label": "Residuos de medicamentos", "terms": ["residues", "withdrawal period", "medicines residues", "LMR"]},
+    {"label": "Resistencia antimicrobiana", "terms": ["antimicrobial resistance", "AMR", "resistencia antimicrobiana", "surveillance"]},
+    {"label": "Normas de alimentación animal en España", "terms": ["alimentación animal", "piensos", "feed law", "normativa española"]},
+    {"label": "Normativa de la EFSA y opiniones científicas", "terms": ["EFSA opinion", "scientific opinion", "risk assessment", "feed safety"]},
+    {"label": "Ayudas PAC y ecoesquemas", "terms": ["PAC", "CAP", "ecoesquemas", "aids"]},
+    {"label": "Condicionalidad y eco-regímenes", "terms": ["conditionality", "eco-schemes", "cross compliance", "greening"]},
+    {"label": "Etiquetado de origen y comercialización", "terms": ["origin labelling", "country of origin", "commercialisation", "etiquetado"]},
+    {"label": "Envases, residuos y sostenibilidad", "terms": ["packaging", "waste", "plastic", "circular economy"]},
 ]
 
-SCIENCE_ANCHORS = [
-    "trial",
-    "review",
-    "effect",
-    "efficacy",
-    "nutrition",
-    "performance",
-    "health",
-    "welfare",
-    "microbiota",
-    "mastitis",
-    "biosecurity",
-    "pathogen",
-    "emissions",
-    "methane",
+MARKET_TOPICS = {item["label"]: item for item in MARKET_TOPIC_ITEMS}
+SCIENCE_TOPICS = {item["label"]: item for item in SCIENCE_TOPIC_ITEMS}
+REG_TOPICS = {item["label"]: item for item in REG_TOPIC_ITEMS}
+
+DEFAULT_MARKET_SELECTION = [
+    "Boletines oficiales de precios",
+    "Coste del pienso",
+    "Noticias del MAPA y del sector",
+]
+DEFAULT_SCIENCE_SELECTION = [
+    "Nutrición y formulación",
+    "Eficiencia alimentaria e índice de conversión",
+    "Bioseguridad y prevención",
+]
+DEFAULT_REG_SELECTION = [
+    "Bienestar animal",
+    "Bioseguridad y sanidad animal",
+    "Piensos, aditivos y alimentación animal",
+] if "Piensos, aditivos y alimentación animal" in REG_TOPICS else [
+    "Bienestar animal",
+    "Bioseguridad y sanidad animal",
+    "Aditivos para alimentación animal",
 ]
 
-STOPWORDS = {
-    "de", "la", "el", "los", "las", "y", "o", "en", "para", "por", "con", "del", "al", "un", "una",
-    "que", "sobre", "entre", "como", "más", "menos", "muy", "sin", "from", "the", "and", "for", "this", "that",
-    "market", "mercado", "sector", "regulation", "science", "technical", "animal", "animals", "ganaderia", "ganadería",
-    "ministerio", "agricultura", "españa", "espana", "official", "update", "news", "article",
+LEGAL_TERMS = {
+    "reglamento", "directive", "directiva", "real decreto", "orden", "ley", "decisión", "decision", "boe",
+    "eur-lex", "regulation", "implementing", "delegated", "resolución", "resolucion", "decreto", "ministerio",
 }
-
-SPECIES_OPTIONS: Dict[str, Dict[str, object]] = {
-    "Alimentación animal": {
-        "aliases": [
-            "alimentación animal", "nutrición animal", "piensos", "feed", "animal feed", "ganadería", "livestock",
-            "porcino", "vacuno", "ovino", "caprino", "avicultura", "cunicultura",
-        ],
-        "science_fallback": ["animal nutrition", "feed efficiency", "gut health", "sustainability"],
-    },
-    "Avicultura de puesta": {
-        "aliases": ["avicultura de puesta", "gallinas ponedoras", "huevos", "layers", "laying hens", "egg sector"],
-        "science_fallback": ["laying hens", "egg quality", "shell quality", "salmonella", "nutrition"],
-    },
-    "Avicultura de carne": {
-        "aliases": ["avicultura de carne", "pollos de engorde", "broilers", "broiler chickens", "pollo", "chicken meat sector"],
-        "science_fallback": ["broilers", "gut health", "coccidiosis", "feed conversion", "necrotic enteritis"],
-    },
-    "Porcino": {
-        "aliases": ["porcino", "cerdo", "swine", "pig", "pigs", "hog sector"],
-        "science_fallback": ["swine nutrition", "gut health", "weaning", "biosecurity", "reproduction"],
-    },
-    "Vacuno de leche": {
-        "aliases": ["vacuno de leche", "vacas de leche", "sector lácteo", "dairy cattle", "dairy cows", "milk sector"],
-        "science_fallback": ["dairy cows", "transition cow", "mastitis", "milk quality", "rumen"],
-    },
-    "Vacuno de carne": {
-        "aliases": ["vacuno de carne", "beef cattle", "beef sector", "cebaderos", "fattening cattle"],
-        "science_fallback": ["beef cattle", "average daily gain", "welfare", "respiratory disease", "methane"],
-    },
-    "Ovino": {
-        "aliases": ["ovino", "cordero", "sheep", "ovine", "lamb sector"],
-        "science_fallback": ["sheep nutrition", "parasites", "milk quality", "reproduction", "bluetongue"],
-    },
-    "Caprino": {
-        "aliases": ["caprino", "goat", "goats", "goat milk", "caprine sector"],
-        "science_fallback": ["goat nutrition", "mastitis", "parasites", "reproduction", "milk quality"],
-    },
-    "Cunicultura": {
-        "aliases": ["cunicultura", "conejo", "conejos", "rabbit production", "rabbit sector"],
-        "science_fallback": ["rabbit nutrition", "digestive health", "enteropathy", "welfare", "reproduction"],
-    },
-}
-
-TOPIC_OPTIONS: Dict[str, Dict[str, List[str]]] = {
-    "Precios y cotizaciones": {
-        "aliases": ["precios", "cotizaciones", "precio", "prices"],
-        "market": ["precio", "precios", "cotizaciones", "mercado", "boletín de precios", "market prices"],
-        "science": ["production efficiency", "feed conversion", "cost of production"],
-        "regulation": ["comercialización", "mercado", "informes sectoriales"],
-    },
-    "Costes de alimentación": {
-        "aliases": ["costes de alimentación", "coste de pienso", "feed costs", "feeding costs"],
-        "market": ["costes de alimentación", "piensos", "feed costs", "raw materials", "materias primas"],
-        "science": ["feed efficiency", "digestibility", "feed conversion", "nutrient utilization"],
-        "regulation": ["piensos", "alimentación animal", "feed regulation"],
-    },
-    "Materias primas y piensos": {
-        "aliases": ["materias primas", "piensos", "feed", "compound feed"],
-        "market": ["materias primas", "piensos", "soja", "maíz", "cereales", "feed market"],
-        "science": ["feed additives", "feed formulation", "nutritional value", "ingredient quality"],
-        "regulation": ["feed hygiene", "aditivos", "alimentación animal"],
-    },
-    "Rentabilidad y márgenes": {
-        "aliases": ["rentabilidad", "márgenes", "margen", "profitability"],
-        "market": ["rentabilidad", "márgenes", "costes", "beneficio", "profitability"],
-        "science": ["economic efficiency", "performance", "feed efficiency"],
-        "regulation": ["ayudas", "mercado", "sector ganadero"],
-    },
-    "Consumo y demanda": {
-        "aliases": ["consumo", "demanda", "consumer demand"],
-        "market": ["consumo", "demanda", "retail", "hostelería", "consumer demand"],
-        "science": ["consumer perception", "quality traits", "shelf life"],
-        "regulation": ["etiquetado", "comercialización", "información alimentaria"],
-    },
-    "Exportación e importación": {
-        "aliases": ["exportación", "importación", "trade", "export"],
-        "market": ["exportación", "importación", "trade", "mercados exteriores", "export"],
-        "science": ["trade disease risk", "quality assurance"],
-        "regulation": ["comercio exterior", "certificación", "sanidad animal"],
-    },
-    "Bienestar animal": {
-        "aliases": ["bienestar animal", "animal welfare", "welfare"],
-        "market": ["bienestar animal", "certificación", "exigencias del mercado", "animal welfare"],
-        "science": ["animal welfare", "stress", "behaviour", "housing"],
-        "regulation": ["bienestar animal", "animal welfare", "transport", "housing requirements"],
-    },
-    "Bioseguridad": {
-        "aliases": ["bioseguridad", "biosecurity"],
-        "market": ["bioseguridad", "brotes", "riesgo sanitario", "biosecurity"],
-        "science": ["biosecurity", "disease prevention", "farm biosecurity"],
-        "regulation": ["bioseguridad", "sanidad animal", "control de enfermedades"],
-    },
-    "Sanidad animal": {
-        "aliases": ["sanidad animal", "animal health"],
-        "market": ["sanidad animal", "brotes", "alerta sanitaria", "animal health"],
-        "science": ["animal health", "disease control", "epidemiology"],
-        "regulation": ["sanidad animal", "animal health law", "control oficial"],
-    },
-    "Antimicrobianos y resistencias": {
-        "aliases": ["antimicrobianos", "antibióticos", "resistencias", "AMR"],
-        "market": ["antibióticos", "resistencias", "uso prudente", "AMR"],
-        "science": ["antimicrobial resistance", "antibiotic reduction", "AMR"],
-        "regulation": ["medicación veterinaria", "antimicrobianos", "resistencias"],
-    },
-    "Vacunación y prevención": {
-        "aliases": ["vacunación", "vacunas", "prevención", "vaccination"],
-        "market": ["vacunación", "prevención", "programas sanitarios"],
-        "science": ["vaccination", "immunity", "disease prevention"],
-        "regulation": ["programas sanitarios", "vacunación", "control de enfermedades"],
-    },
-    "Trazabilidad y movimientos": {
-        "aliases": ["trazabilidad", "movimientos", "traceability", "animal movements"],
-        "market": ["movimientos", "trazabilidad", "restricciones", "transport"],
-        "science": ["traceability", "animal movements", "disease spread"],
-        "regulation": ["trazabilidad", "movimientos", "identificación", "transport"],
-    },
-    "Sostenibilidad y emisiones": {
-        "aliases": ["sostenibilidad", "emisiones", "sustainability", "emissions"],
-        "market": ["sostenibilidad", "emisiones", "descarbonización", "ESG"],
-        "science": ["emissions", "life cycle assessment", "sustainability", "carbon footprint"],
-        "regulation": ["emisiones", "sostenibilidad", "clima", "medio ambiente"],
-    },
-    "Metano y huella de carbono": {
-        "aliases": ["metano", "huella de carbono", "methane", "carbon footprint"],
-        "market": ["metano", "huella de carbono", "descarbonización"],
-        "science": ["methane", "enteric methane", "carbon footprint", "GHG"],
-        "regulation": ["metano", "huella de carbono", "emisiones"],
-    },
-    "Calidad del producto": {
-        "aliases": ["calidad del producto", "milk quality", "egg quality", "meat quality"],
-        "market": ["calidad", "valor añadido", "calidad del producto"],
-        "science": ["milk quality", "egg quality", "meat quality", "quality traits"],
-        "regulation": ["calidad", "higiene", "seguridad alimentaria"],
-    },
-    "Reproducción y fertilidad": {
-        "aliases": ["reproducción", "fertilidad", "reproduction", "fertility"],
-        "market": ["fertilidad", "productividad", "reposición"],
-        "science": ["reproduction", "fertility", "semen quality", "ovulation"],
-        "regulation": ["reproducción", "centros de reproducción", "sanidad"],
-    },
-    "Salud intestinal": {
-        "aliases": ["salud intestinal", "gut health", "intestinal health"],
-        "market": ["salud intestinal", "eficiencia", "gut health"],
-        "science": ["gut health", "microbiota", "intestinal integrity", "digestive health"],
-        "regulation": ["aditivos", "nutrición", "salud intestinal"],
-    },
-    "Micotoxinas": {
-        "aliases": ["micotoxinas", "mycotoxins"],
-        "market": ["micotoxinas", "contaminación", "materias primas"],
-        "science": ["mycotoxins", "deoxynivalenol", "aflatoxin", "detoxifiers"],
-        "regulation": ["micotoxinas", "piensos", "seguridad alimentaria"],
-    },
-    "Salmonella": {
-        "aliases": ["salmonella"],
-        "market": ["salmonella", "alerta alimentaria", "brote"],
-        "science": ["salmonella", "control", "vaccination", "hygiene"],
-        "regulation": ["salmonella", "control oficial", "programas nacionales"],
-    },
-    "Coccidiosis": {
-        "aliases": ["coccidiosis", "coccidia"],
-        "market": ["coccidiosis", "brotes", "control"],
-        "science": ["coccidiosis", "eimeria", "anticoccidials", "vaccination"],
-        "regulation": ["coccidiosis", "medicación veterinaria", "control"],
-    },
-    "Mastitis": {
-        "aliases": ["mastitis", "mamitis"],
-        "market": ["mastitis", "calidad de leche", "coste sanitario"],
-        "science": ["mastitis", "udder health", "somatic cell count", "intramammary infection"],
-        "regulation": ["calidad de leche", "higiene", "mastitis"],
-    },
-    "Peste porcina africana": {
-        "aliases": ["peste porcina africana", "PPA", "African swine fever", "ASF"],
-        "market": ["peste porcina africana", "African swine fever", "restricciones", "exportación"],
-        "science": ["African swine fever", "ASF", "ASFV", "biosecurity"],
-        "regulation": ["peste porcina africana", "African swine fever", "zonificación", "movimientos"],
-    },
-    "Influenza aviar": {
-        "aliases": ["influenza aviar", "avian influenza", "HPAI", "bird flu"],
-        "market": ["influenza aviar", "avian influenza", "brotes", "restricciones"],
-        "science": ["avian influenza", "HPAI", "H5N1", "biosecurity"],
-        "regulation": ["influenza aviar", "avian influenza", "zonas de restricción", "bioseguridad"],
-    },
-    "Lengua azul": {
-        "aliases": ["lengua azul", "bluetongue", "BTV"],
-        "market": ["lengua azul", "bluetongue", "movimientos", "restricciones"],
-        "science": ["bluetongue", "BTV", "vector control", "vaccination"],
-        "regulation": ["lengua azul", "bluetongue", "movimientos", "vacunación"],
-    },
-    "Etiquetado y comercialización": {
-        "aliases": ["etiquetado", "comercialización", "labeling", "marketing standards"],
-        "market": ["etiquetado", "comercialización", "valor añadido"],
-        "science": ["labeling", "quality traits", "consumer perception"],
-        "regulation": ["etiquetado", "comercialización", "información alimentaria"],
-    },
-    "Normativa de alimentación animal": {
-        "aliases": ["alimentación animal", "feed regulation", "feed hygiene", "piensos"],
-        "market": ["piensos", "alimentación animal", "aditivos"],
-        "science": ["feed regulation", "feed additives", "feed hygiene"],
-        "regulation": ["alimentación animal", "piensos", "aditivos", "feed hygiene"],
-    },
-}
-
-
-# -----------------------------------------------------------------------------
-# Utilities
-# -----------------------------------------------------------------------------
-
-def _normalize(text: str) -> str:
-    text = unicodedata.normalize("NFKD", text or "")
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9\s\-/]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
 
 
 def _strip_html(text: str) -> str:
-    return BeautifulSoup(text or "", "html.parser").get_text(" ", strip=True)
-
-
-def _truncate(text: str, max_len: int = 360) -> str:
-    text = re.sub(r"\s+", " ", (text or "").strip())
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 1].rstrip() + "…"
-
-
-def _canonical_url(url: str) -> str:
-    if not url:
+    if not text:
         return ""
-    parsed = urlparse(url.strip())
-    path = parsed.path.rstrip("/")
-    return f"{parsed.netloc.lower()}{path.lower()}"
+    return re.sub(r"\s+", " ", BeautifulSoup(text, "html.parser").get_text(" ", strip=True)).strip()
 
 
-def _domain(url: str) -> str:
-    try:
-        return urlparse(url).netloc.lower()
-    except Exception:
-        return ""
 
-
-def _clean_url(url: str, base_url: str = "") -> str:
-    if not url:
-        return ""
-    return urljoin(base_url, url.strip())
-
-
-def _request(url: str, *, params: Optional[dict] = None, expect: str = "text"):
-    last_error = None
-    for attempt in range(2):
-        try:
-            response = requests.get(
-                url,
-                params=params,
-                timeout=REQUEST_TIMEOUT,
-                headers={
-                    "User-Agent": USER_AGENT,
-                    "Accept": "application/json, application/xml, text/xml, text/html, */*",
-                },
-            )
-            response.raise_for_status()
-            if expect == "json":
-                return response.json()
-            if expect == "content":
-                return response.content
-            return response.text
-        except Exception as exc:
-            last_error = exc
-            if attempt == 0:
-                time.sleep(0.6)
-    raise RuntimeError(f"Error al consultar una fuente externa: {last_error}")
-
-
-def _normalize_datetime(value: Optional[datetime]) -> Optional[datetime]:
+def _normalize_dt(value: Optional[datetime]) -> Optional[datetime]:
     if value is None:
         return None
-    if value.tzinfo is not None and value.utcoffset() is not None:
+    if value.tzinfo is not None:
         return value.astimezone(timezone.utc).replace(tzinfo=None)
     return value
+
 
 
 def _parse_date(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     try:
-        return _normalize_datetime(date_parser.parse(str(value), fuzzy=True))
+        return _normalize_dt(date_parser.parse(str(value)))
     except Exception:
         return None
+
 
 
 def _date_in_range(value: Optional[datetime], start: date, end: date) -> bool:
     if value is None:
         return True
-    return start <= value.date() <= end
+    current = value.date()
+    return start <= current <= end
 
 
-def _unique_keep_order(items: Iterable[str]) -> List[str]:
-    seen = set()
-    out: List[str] = []
-    for item in items:
-        clean = re.sub(r"\s+", " ", (item or "").strip())
-        if not clean:
-            continue
-        key = _normalize(clean)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(clean)
-    return out
+
+def _truncate(text: str, max_len: int = 420) -> str:
+    text = text or ""
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1].rstrip() + "…"
 
 
-def _record_key(item: dict) -> Tuple[str, str]:
-    if item.get("doi"):
-        return ("doi", _normalize(item["doi"]))
-    if item.get("url"):
-        return ("url", _canonical_url(item["url"]))
-    return ("title", _normalize(item.get("title", "")))
+
+def _safe_get(url: str, **kwargs) -> requests.Response:
+    headers = kwargs.pop("headers", {})
+    merged = {"User-Agent": USER_AGENT}
+    merged.update(headers)
+    response = requests.get(url, timeout=REQUEST_TIMEOUT, headers=merged, **kwargs)
+    response.raise_for_status()
+    return response
+
+
+
+def _clean_search_link(url: str) -> str:
+    if not url:
+        return ""
+    if "duckduckgo.com/l/?" in url:
+        parsed = urlparse(url)
+        q = parse_qs(parsed.query)
+        if "uddg" in q:
+            return unquote(q["uddg"][0])
+    return url
+
+
+
+def _url_domain(url: str) -> str:
+    try:
+        return urlparse(url).netloc.lower()
+    except Exception:
+        return ""
+
+
+
+def _keywords_from_text(text: str, top_k: int = 10) -> List[str]:
+    tokens = re.findall(r"[A-Za-zÁÉÍÓÚáéíóúÑñÜü0-9\-]{4,}", (text or "").lower())
+    counts = Counter(token for token in tokens if token not in STOPWORDS)
+    return [token for token, _ in counts.most_common(top_k)]
+
 
 
 def _dedupe(records: List[dict]) -> List[dict]:
     seen = set()
-    out = []
+    out: List[dict] = []
     for item in records:
-        key = _record_key(item)
+        key = (
+            (item.get("title") or "").strip().lower(),
+            (item.get("url") or "").strip().lower(),
+        )
         if key in seen:
             continue
         seen.add(key)
@@ -477,101 +447,121 @@ def _dedupe(records: List[dict]) -> List[dict]:
     return out
 
 
-def _keywords_from_text(text: str, *, exclude: Sequence[str] = (), top_k: int = 8) -> List[str]:
-    exclude_norm = {_normalize(t) for t in exclude}
-    words = re.findall(r"[A-Za-zÁÉÍÓÚáéíóúÑñÜü0-9\-]{4,}", text.lower())
-    counts = Counter()
-    for word in words:
-        norm = _normalize(word)
-        if norm in STOPWORDS or norm in exclude_norm or len(norm) < 4:
+
+def _all_species_selected(selected_species: Sequence[str]) -> bool:
+    return not selected_species or "All species" in selected_species
+
+
+
+def _selected_profiles(selected_species: Sequence[str]) -> List[Dict[str, List[str]]]:
+    if _all_species_selected(selected_species):
+        return [SPECIES_PROFILES["All species"], SPECIES_PROFILES["Alimentación animal"]]
+    return [SPECIES_PROFILES[name] for name in selected_species if name in SPECIES_PROFILES]
+
+
+
+def species_terms(selected_species: Sequence[str], category: str) -> List[str]:
+    key = {
+        "market": "market_aliases",
+        "science": "science_aliases",
+        "regulation": "reg_aliases",
+    }[category]
+    terms: List[str] = []
+    for profile in _selected_profiles(selected_species):
+        terms.extend(profile.get(key, []))
+        terms.extend(profile.get("aliases", []))
+    deduped = []
+    seen = set()
+    for term in terms:
+        low = term.lower()
+        if low not in seen:
+            seen.add(low)
+            deduped.append(term)
+    return deduped[:18]
+
+
+
+def species_filter_match(text: str, selected_species: Sequence[str], category: str) -> bool:
+    if _all_species_selected(selected_species):
+        return True
+    hay = (text or "").lower()
+    for term in species_terms(selected_species, category):
+        if term.lower() in hay:
+            return True
+    if "Alimentación animal" in selected_species and any(token in hay for token in ["feed", "pienso", "alimentación animal", "animal nutrition"]):
+        return True
+    return False
+
+
+
+def mentions_only_other_species(text: str, selected_species: Sequence[str], category: str) -> bool:
+    if _all_species_selected(selected_species):
+        return False
+    hay = (text or "").lower()
+    selected_aliases = {term.lower() for term in species_terms(selected_species, category)}
+    if any(alias in hay for alias in selected_aliases):
+        return False
+    other_terms: List[str] = []
+    for name, profile in SPECIES_PROFILES.items():
+        if name in selected_species or name in {"All species", "Alimentación animal"}:
             continue
-        counts[norm] += 1
-    return [w for w, _ in counts.most_common(top_k)]
+        other_terms.extend(profile.get("aliases", []))
+    return any(term.lower() in hay for term in other_terms)
 
 
-def _contains_any(text: str, terms: Sequence[str]) -> bool:
-    hay = _normalize(text)
-    return any(_normalize(term) in hay for term in terms if term)
+
+def topic_terms(topic_dict: Dict[str, dict], selected_labels: Sequence[str]) -> List[str]:
+    terms: List[str] = []
+    for label in selected_labels:
+        item = topic_dict.get(label)
+        if item:
+            terms.extend(item.get("terms", []))
+            terms.append(label)
+    deduped = []
+    seen = set()
+    for term in terms:
+        low = term.lower()
+        if low not in seen:
+            seen.add(low)
+            deduped.append(term)
+    return deduped
 
 
-def _extract_ddg_url(href: str) -> str:
-    if not href:
-        return ""
-    if href.startswith("//"):
-        href = "https:" + href
-    if href.startswith("/") and "uddg=" not in href:
-        return ""
-    if "uddg=" in href:
-        parsed = urlparse(href)
-        query = parse_qs(parsed.query)
-        if query.get("uddg"):
-            return unquote(query["uddg"][0])
-    return href
+
+def _topic_hit_count(text: str, terms: Sequence[str]) -> int:
+    hay = (text or "").lower()
+    return sum(1 for term in terms if term.lower() in hay)
 
 
-# -----------------------------------------------------------------------------
-# Search profile
-# -----------------------------------------------------------------------------
 
-def build_search_profile(species: str, topics: Sequence[str]) -> Dict[str, List[str]]:
-    species_data = SPECIES_OPTIONS[species]
-    selected_topics = [topic for topic in topics if topic in TOPIC_OPTIONS]
-    if not selected_topics:
-        selected_topics = ["Precios y cotizaciones"]
-
-    topic_aliases: List[str] = []
-    market_terms: List[str] = []
-    science_terms: List[str] = []
-    regulation_terms: List[str] = []
-
-    for topic in selected_topics:
-        topic_info = TOPIC_OPTIONS[topic]
-        topic_aliases.extend(topic_info["aliases"])
-        market_terms.extend(topic_info["market"])
-        science_terms.extend(topic_info["science"])
-        regulation_terms.extend(topic_info["regulation"])
-
-    if not science_terms:
-        science_terms.extend(species_data.get("science_fallback", []))
-
-    return {
-        "selected_topics": selected_topics,
-        "species_terms": _unique_keep_order(species_data["aliases"]),
-        "topic_aliases": _unique_keep_order(topic_aliases),
-        "market_terms": _unique_keep_order(market_terms),
-        "science_terms": _unique_keep_order(science_terms + species_data.get("science_fallback", [])),
-        "regulation_terms": _unique_keep_order(regulation_terms),
-        "market_debug": _unique_keep_order(market_terms[:8]),
-        "regulation_debug": _unique_keep_order(regulation_terms[:8]),
-    }
+def _official_domain(url: str) -> bool:
+    domain = _url_domain(url)
+    return any(domain.endswith(item) for item in OFFICIAL_REG_DOMAINS)
 
 
-# -----------------------------------------------------------------------------
-# External sources
-# -----------------------------------------------------------------------------
-@st.cache_data(show_spinner=False, ttl=1800)
-def search_google_news(query: str, start_date: date, end_date: date, max_results: int = 8) -> List[dict]:
-    url = "https://news.google.com/rss/search"
-    params = {"q": query, "hl": "es", "gl": "ES", "ceid": "ES:es"}
-    content = _request(url, params=params, expect="content")
-    feed = feedparser.parse(content)
+@st.cache_data(show_spinner=False, ttl=7200)
+def search_google_news(query: str, start_date: date, end_date: date, max_results: int = 12) -> List[dict]:
+    url = f"https://news.google.com/rss/search?q={quote(query)}&hl=es&gl=ES&ceid=ES:es"
+    response = _safe_get(url)
+    feed = feedparser.parse(response.content)
     records: List[dict] = []
-    for entry in feed.entries:
+    for entry in getattr(feed, "entries", []):
         published = _parse_date(entry.get("published") or entry.get("pubDate"))
         if not _date_in_range(published, start_date, end_date):
             continue
         source = "Google News"
-        if isinstance(entry.get("source"), dict):
-            source = entry.get("source", {}).get("title", source)
+        source_obj = entry.get("source")
+        if isinstance(source_obj, dict):
+            source = source_obj.get("title", source)
         records.append(
             {
                 "title": _strip_html(entry.get("title", "Sin título")),
                 "snippet": _truncate(_strip_html(entry.get("summary", ""))),
-                "url": _clean_url(entry.get("link", "")),
+                "url": entry.get("link", ""),
                 "source": source,
                 "published": published.isoformat() if published else "",
-                "source_db": "Google News",
-                "query_used": query,
+                "query": query,
+                "search_engine": "Google News",
             }
         )
         if len(records) >= max_results:
@@ -579,31 +569,29 @@ def search_google_news(query: str, start_date: date, end_date: date, max_results
     return _dedupe(records)
 
 
-@st.cache_data(show_spinner=False, ttl=1800)
-def search_duckduckgo_html(query: str, max_results: int = 8) -> List[dict]:
-    html = _request(DUCKDUCKGO_HTML_URL, params={"q": query, "kl": "es-es"}, expect="text")
-    soup = BeautifulSoup(html, "html.parser")
+@st.cache_data(show_spinner=False, ttl=7200)
+def search_duckduckgo_web(query: str, max_results: int = 10) -> List[dict]:
+    response = _safe_get("https://duckduckgo.com/html/", params={"q": query, "kl": "es-es"})
+    soup = BeautifulSoup(response.text, "html.parser")
     records: List[dict] = []
-    results = soup.select("div.result")
-    for result in results:
-        anchor = result.select_one("a.result__a")
-        if not anchor:
+    for result in soup.select("div.result"):
+        a = result.select_one("a.result__a")
+        if not a:
             continue
-        href = _extract_ddg_url(anchor.get("href", ""))
-        if not href:
-            continue
-        title = _strip_html(anchor.get_text(" ", strip=True))
+        raw_url = a.get("href", "")
+        url = _clean_search_link(raw_url)
+        title = _strip_html(a.get_text(" ", strip=True))
         snippet_node = result.select_one("a.result__snippet") or result.select_one("div.result__snippet")
         snippet = _truncate(_strip_html(snippet_node.get_text(" ", strip=True)) if snippet_node else "")
         records.append(
             {
-                "title": title or "Sin título",
+                "title": title,
                 "snippet": snippet,
-                "url": href,
-                "source": _domain(href) or "DuckDuckGo",
+                "url": url,
+                "source": _url_domain(url) or "DuckDuckGo",
                 "published": "",
-                "source_db": "DuckDuckGo",
-                "query_used": query,
+                "query": query,
+                "search_engine": "DuckDuckGo",
             }
         )
         if len(records) >= max_results:
@@ -611,677 +599,594 @@ def search_duckduckgo_html(query: str, max_results: int = 8) -> List[dict]:
     return _dedupe(records)
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def search_mapa_news_rss(max_items: int = 80) -> List[dict]:
-    content = _request(MAPA_NEWS_RSS_URL, expect="content")
-    feed = feedparser.parse(content)
-    records: List[dict] = []
-    for entry in feed.entries[:max_items]:
-        published = _parse_date(entry.get("published") or entry.get("pubDate"))
-        records.append(
-            {
-                "title": _strip_html(entry.get("title", "Sin título")),
-                "snippet": _truncate(_strip_html(entry.get("summary", ""))),
-                "url": _clean_url(entry.get("link", "")),
-                "source": "MAPA",
-                "published": published.isoformat() if published else "",
-                "source_db": "MAPA - Noticias",
-            }
-        )
-    return _dedupe(records)
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def search_mapa_market_portal() -> List[dict]:
-    html = _request(MAPA_MARKETS_URL, expect="text")
-    soup = BeautifulSoup(html, "html.parser")
-    records: List[dict] = []
-    for anchor in soup.find_all("a", href=True):
-        title = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True)).strip()
-        href = _clean_url(anchor.get("href", ""), MAPA_MARKETS_URL)
-        if not title or not href or "mapa.gob.es" not in href:
-            continue
-        context = _truncate(re.sub(r"\s+", " ", anchor.parent.get_text(" ", strip=True)))
-        records.append(
-            {
-                "title": title,
-                "snippet": context or "Publicación del MAPA sobre mercados o precios ganaderos.",
-                "url": href,
-                "source": "MAPA - Mercados",
-                "published": "",
-                "source_db": "MAPA - Mercados",
-            }
-        )
-    return _dedupe(records)
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def search_mapa_legislation_index() -> List[dict]:
-    html = _request(MAPA_LEGISLATION_URL, expect="text")
-    soup = BeautifulSoup(html, "html.parser")
-    records: List[dict] = []
-    for anchor in soup.find_all("a", href=True):
-        title = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True)).strip()
-        href = _clean_url(anchor.get("href", ""), MAPA_LEGISLATION_URL)
-        if not title or not href or "mapa.gob.es" not in href:
-            continue
-        records.append(
-            {
-                "title": title,
-                "snippet": "Página oficial del MAPA relacionada con normativa o documentación sectorial.",
-                "url": href,
-                "source": "MAPA - Legislación",
-                "published": "",
-                "source_db": "MAPA - Legislación",
-            }
-        )
-    return _dedupe(records)
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def search_europe_pmc(query: str, start_date: date, end_date: date, max_results: int = 14) -> List[dict]:
-    full_query = f"({query}) AND FIRST_PDATE:[{start_date.isoformat()} TO {end_date.isoformat()}]"
+@st.cache_data(show_spinner=False, ttl=7200)
+def search_openalex(query: str, start_date: date, end_date: date, max_results: int = 10) -> List[dict]:
     params = {
-        "query": full_query,
-        "format": "json",
-        "pageSize": max_results,
-        "sort": "RELEVANCE",
-        "resultType": "core",
+        "search": query,
+        "filter": f"from_publication_date:{start_date.isoformat()},to_publication_date:{end_date.isoformat()}",
+        "per-page": max_results,
+        "sort": "relevance_score:desc",
+        "mailto": "radar@example.com",
     }
-    data = _request("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params=params, expect="json")
-    results = data.get("resultList", {}).get("result", [])
+    response = _safe_get("https://api.openalex.org/works", params=params)
+    data = response.json()
     records: List[dict] = []
-    for item in results:
-        published = _parse_date(item.get("firstPublicationDate") or item.get("pubYear"))
+    for item in data.get("results", []):
+        published = item.get("publication_date") or str(item.get("publication_year") or "")
+        abstract = ""
+        inverted = item.get("abstract_inverted_index") or {}
+        if inverted:
+            positions = []
+            for word, indices in inverted.items():
+                for idx in indices:
+                    positions.append((idx, word))
+            abstract = " ".join(word for _, word in sorted(positions)[:120])
+        source = "OpenAlex"
+        primary = item.get("primary_location") or {}
+        if primary.get("source") and primary["source"].get("display_name"):
+            source = primary["source"]["display_name"]
+        authors = ", ".join(a.get("author", {}).get("display_name", "") for a in item.get("authorships", [])[:6]).strip(", ")
+        records.append(
+            {
+                "title": item.get("display_name", "Sin título"),
+                "snippet": _truncate(abstract or item.get("title", "")),
+                "url": item.get("doi") or (primary.get("landing_page_url") or item.get("id", "")),
+                "source": source,
+                "published": published,
+                "authors": authors,
+                "journal": source,
+                "doi": item.get("doi", ""),
+                "query": query,
+                "search_engine": "OpenAlex",
+            }
+        )
+    return _dedupe(records)
+
+
+@st.cache_data(show_spinner=False, ttl=7200)
+def search_europe_pmc(query: str, start_date: date, end_date: date, max_results: int = 10) -> List[dict]:
+    full_query = f"({query}) AND FIRST_PDATE:[{start_date.isoformat()} TO {end_date.isoformat()}]"
+    params = {"query": full_query, "format": "json", "pageSize": max_results, "sort": "FIRST_PDATE_D"}
+    response = _safe_get("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params=params)
+    data = response.json()
+    records: List[dict] = []
+    for item in data.get("resultList", {}).get("result", []):
+        published = item.get("firstPublicationDate") or item.get("pubYear", "")
         doi = item.get("doi")
         url = ""
         if doi:
             url = f"https://doi.org/{doi}"
         elif item.get("pmid"):
             url = f"https://europepmc.org/article/MED/{item['pmid']}"
+        elif item.get("pmcid"):
+            url = f"https://europepmc.org/article/PMC/{item['pmcid']}"
         records.append(
             {
                 "title": _strip_html(item.get("title", "Sin título")),
                 "snippet": _truncate(_strip_html(item.get("abstractText", "")) or item.get("journalTitle", "")),
                 "url": url,
                 "source": item.get("journalTitle", "Europe PMC"),
-                "published": published.isoformat() if published else "",
-                "source_db": "Europe PMC",
-                "doi": doi or "",
+                "published": published,
                 "authors": item.get("authorString", ""),
+                "journal": item.get("journalTitle", "Europe PMC"),
+                "doi": doi or "",
+                "query": query,
+                "search_engine": "Europe PMC",
             }
         )
     return _dedupe(records)
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def search_openalex(query: str, start_date: date, end_date: date, max_results: int = 14) -> List[dict]:
-    params = {
-        "search": query,
-        "filter": f"from_publication_date:{start_date.isoformat()},to_publication_date:{end_date.isoformat()},type:article|preprint,is_paratext:false",
-        "per_page": max_results,
-        "sort": "relevance_score:desc",
-    }
-    data = _request("https://api.openalex.org/works", params=params, expect="json")
-    results = data.get("results", [])
-    records: List[dict] = []
-    for item in results:
-        primary_location = item.get("primary_location") or {}
-        best_oa = item.get("best_oa_location") or {}
-        ids = item.get("ids") or {}
-        url = primary_location.get("landing_page_url") or best_oa.get("landing_page_url") or item.get("doi") or ids.get("doi") or item.get("id", "")
-        journal_name = ((primary_location.get("source") or {}).get("display_name")) or ((best_oa.get("source") or {}).get("display_name")) or "OpenAlex"
-        authors = ", ".join(
-            a.get("author", {}).get("display_name", "")
-            for a in (item.get("authorships") or [])[:6]
-            if a.get("author", {}).get("display_name")
-        )
-        snippet = journal_name
-        if item.get("abstract_inverted_index"):
-            pairs = []
-            for token, positions in item["abstract_inverted_index"].items():
-                for pos in positions:
-                    pairs.append((pos, token))
-            snippet = " ".join(token for _, token in sorted(pairs)[:90])
-        records.append(
-            {
-                "title": _strip_html(item.get("display_name", "Sin título")),
-                "snippet": _truncate(snippet),
-                "url": _clean_url(url),
-                "source": journal_name,
-                "published": item.get("publication_date", ""),
-                "source_db": "OpenAlex",
-                "doi": (item.get("doi") or ids.get("doi") or "").replace("https://doi.org/", ""),
-                "authors": authors,
-            }
-        )
-    return _dedupe(records)
+
+def build_queries(selected_species: Sequence[str], selected_topics: Sequence[str], category: str) -> List[str]:
+    species_clause = species_terms(selected_species, category)
+    species_phrase = " OR ".join(f'"{term}"' for term in species_clause[:8]) if species_clause else '"ganadería"'
+    topic_catalog = {
+        "market": MARKET_TOPICS,
+        "science": SCIENCE_TOPICS,
+        "regulation": REG_TOPICS,
+    }[category]
+    queries: List[str] = []
+    for label in selected_topics:
+        item = topic_catalog.get(label)
+        if not item:
+            continue
+        topic_phrase = " OR ".join(f'"{term}"' for term in item["terms"][:6])
+        if category == "market":
+            queries.append(f"({species_phrase}) ({topic_phrase})")
+            queries.append(f"({species_phrase}) ({topic_phrase}) (MAPA OR ministerio agricultura OR boletín OR precios OR mercado OR noticias)")
+        elif category == "science":
+            species_simple = " ".join(species_clause[:4]) if species_clause else "livestock animal nutrition"
+            topic_simple = " ".join(item["terms"][:5])
+            queries.append(f"{species_simple} {topic_simple}")
+        else:
+            official_sites = "(site:boe.es OR site:eur-lex.europa.eu OR site:mapa.gob.es OR site:aesan.gob.es OR site:efsa.europa.eu OR site:miteco.gob.es OR site:sanidad.gob.es)"
+            legal_anchor = "(reglamento OR directiva OR ley OR real decreto OR orden OR resolución OR BOE OR EUR-Lex OR regulation)"
+            queries.append(f"({species_phrase}) ({topic_phrase}) {legal_anchor} {official_sites}")
+            queries.append(f"({species_phrase}) ({topic_phrase}) normativa legislación regulación {official_sites}")
+    deduped = []
+    seen = set()
+    for query in queries:
+        low = query.lower().strip()
+        if low and low not in seen:
+            seen.add(low)
+            deduped.append(query)
+    return deduped[:24]
 
 
-# -----------------------------------------------------------------------------
-# Query builders
-# -----------------------------------------------------------------------------
 
-def _topic_phrase(profile: dict) -> str:
-    aliases = profile["topic_aliases"]
-    if not aliases:
-        return ""
-    return aliases[0]
-
-
-def build_market_queries(species: str, profile: dict) -> List[str]:
-    species_term = profile["species_terms"][0]
-    topic_terms = profile["market_terms"][:4] or ["mercado"]
-    queries = [
-        f'{species_term} {topic_terms[0]} mercado precios',
-        f'{species_term} {topic_terms[0]} site:mapa.gob.es',
-        f'{species_term} {topic_terms[0]} boletín precios',
-    ]
-
-    domain_focus = ["mapa.gob.es", "efeagro.com", "agrodigital.com", "interempresas.net"]
-    for domain, term in zip(domain_focus, topic_terms + topic_terms[:2]):
-        queries.append(f'site:{domain} {species_term} {term}')
-
-    if species == "Alimentación animal":
-        queries.extend([
-            f'alimentación animal {topic_terms[0]} mercado',
-            f'ganadería {topic_terms[0]} ministerio agricultura',
-        ])
-
-    return _unique_keep_order(queries)[:8]
-
-
-def build_regulation_queries(species: str, profile: dict) -> List[str]:
-    species_term = profile["species_terms"][0]
-    reg_terms = profile["regulation_terms"][:4] or profile["topic_aliases"][:2] or ["normativa"]
-    queries = [
-        f'site:boe.es {species_term} {reg_terms[0]} real decreto reglamento',
-        f'site:eur-lex.europa.eu {species_term} {reg_terms[0]} regulation',
-        f'site:mapa.gob.es {species_term} {reg_terms[0]} normativa',
-        f'site:efsa.europa.eu {species_term} {reg_terms[0]}',
-    ]
-    if species == "Alimentación animal":
-        queries.append(f'site:boe.es alimentación animal {reg_terms[0]} piensos reglamento')
-    return _unique_keep_order(queries)[:6]
-
-
-def build_science_queries(species: str, profile: dict) -> Dict[str, str]:
-    species_terms = profile["species_terms"][:4]
-    science_terms = profile["science_terms"][:6]
-    species_block = " OR ".join(f'"{term}"' if " " in term else term for term in species_terms)
-    topic_block = " OR ".join(f'"{term}"' if " " in term else term for term in science_terms)
-    broad_text = " ".join(_unique_keep_order(species_terms + science_terms[:4]))
-    return {
-        "openalex": f"({species_block}) AND ({topic_block})",
-        "europepmc": f"({species_block}) AND ({topic_block})",
-        "broad": broad_text,
-    }
-
-
-# -----------------------------------------------------------------------------
-# Scoring and filtering
-# -----------------------------------------------------------------------------
-
-def _score_text(text: str, primary_terms: Sequence[str], topic_terms: Sequence[str], support_terms: Sequence[str]) -> float:
-    hay = _normalize(text)
-    score = 0.0
-    primary_hits = 0
-    topic_hits = 0
-
-    for term in primary_terms:
-        norm = _normalize(term)
-        if norm and norm in hay:
-            score += 1.6 if " " in norm else 1.0
-            primary_hits += 1
-
-    for term in topic_terms:
-        norm = _normalize(term)
-        if norm and norm in hay:
-            score += 2.5 if " " in norm else 1.6
-            topic_hits += 1
-
-    for term in support_terms:
-        norm = _normalize(term)
-        if norm and norm in hay:
-            score += 0.45
-
-    if topic_terms and topic_hits == 0:
-        score -= 1.3
-    if primary_terms and primary_hits == 0:
-        score -= 0.5
+def score_result(item: dict, category: str, selected_species: Sequence[str], selected_topic_labels: Sequence[str]) -> int:
+    text = " ".join(
+        [
+            item.get("title", ""),
+            item.get("snippet", ""),
+            item.get("source", ""),
+            item.get("url", ""),
+            item.get("query", ""),
+        ]
+    ).lower()
+    if category == "market":
+        topic_dict = MARKET_TOPICS
+    elif category == "science":
+        topic_dict = SCIENCE_TOPICS
+    else:
+        topic_dict = REG_TOPICS
+    terms = topic_terms(topic_dict, selected_topic_labels)
+    topic_hits = _topic_hit_count(text, terms)
+    species_ok = species_filter_match(text, selected_species, category)
+    score = topic_hits * 3
+    if species_ok:
+        score += 4
+    if mentions_only_other_species(text, selected_species, category):
+        score -= 8
+    domain = _url_domain(item.get("url", ""))
+    if category == "market":
+        if any(domain.endswith(site) for site in MARKET_NEWS_SITES):
+            score += 3
+        if any(token in text for token in ["precio", "prices", "market", "mercado", "boletín", "cotización", "news"]):
+            score += 2
+    elif category == "science":
+        if item.get("search_engine") in {"OpenAlex", "Europe PMC"}:
+            score += 6
+        if any(hint in text for hint in SCIENCE_HINTS):
+            score += 2
+    else:
+        if _official_domain(item.get("url", "")):
+            score += 8
+        legal_hits = sum(1 for token in LEGAL_TERMS if token in text)
+        score += legal_hits * 2
+        if legal_hits == 0:
+            score -= 6
     return score
 
 
-def _sort_market(records: List[dict], profile: dict, start_date: date, end_date: date) -> List[dict]:
-    out = []
-    primary_terms = profile["species_terms"]
-    topic_terms = profile["topic_aliases"] + profile["market_terms"][:6]
-    support_terms = MARKET_ANCHORS + profile["market_terms"][:6]
-    for item in records:
-        text = " ".join([item.get("title", ""), item.get("snippet", ""), item.get("source", "")])
-        score = _score_text(text, primary_terms, topic_terms, support_terms)
-        dom = _domain(item.get("url", ""))
-        if dom in MARKET_MEDIA_DOMAINS or item.get("source_db", "").startswith("MAPA"):
-            score += 0.8
-        published = _parse_date(item.get("published"))
-        if published and _date_in_range(published, start_date, end_date):
-            age_days = max((datetime.now() - published).days, 0)
-            if age_days <= 30:
-                score += 0.5
-            elif age_days <= 180:
-                score += 0.2
-        out.append({**item, "score": round(score, 3)})
-    out.sort(key=lambda x: (x.get("score", 0), x.get("published", "")), reverse=True)
-    return out
 
-
-def _sort_regulation(records: List[dict], profile: dict) -> List[dict]:
-    out = []
-    primary_terms = profile["species_terms"]
-    topic_terms = profile["topic_aliases"] + profile["regulation_terms"][:8]
-    support_terms = LEGAL_ANCHORS + profile["regulation_terms"][:6]
-    generic_species = _normalize(primary_terms[0]) == _normalize("alimentación animal")
-
-    for item in records:
+def filter_and_rank(records: List[dict], category: str, selected_species: Sequence[str], selected_topics: Sequence[str], max_results: int) -> List[dict]:
+    ranked: List[tuple] = []
+    for item in _dedupe(records):
         text = " ".join([item.get("title", ""), item.get("snippet", ""), item.get("source", ""), item.get("url", "")])
-        score = _score_text(text, [] if generic_species else primary_terms, topic_terms, support_terms)
-        dom = _domain(item.get("url", ""))
-        official = dom in OFFICIAL_REGULATORY_DOMAINS or item.get("source_db", "").startswith("MAPA")
-        topic_match = _contains_any(text, topic_terms)
-        legal_match = _contains_any(text, LEGAL_ANCHORS)
-        species_match = generic_species or _contains_any(text, primary_terms)
+        score = score_result(item, category, selected_species, selected_topics)
+        topic_catalog = {"market": MARKET_TOPICS, "science": SCIENCE_TOPICS, "regulation": REG_TOPICS}[category]
+        term_list = topic_terms(topic_catalog, selected_topics)
+        topic_hit = _topic_hit_count(text, term_list) > 0
+        species_ok = species_filter_match(text, selected_species, category)
 
-        if official:
-            score += 1.3
-        if not official:
-            score -= 2.0
-        if not topic_match:
-            score -= 2.5
-        if not legal_match:
-            score -= 0.8
-        if not species_match:
-            score -= 1.2
-        if official and topic_match and (species_match or generic_species):
-            score += 0.8
-        out.append({**item, "score": round(score, 3)})
+        if category == "market":
+            if not topic_hit:
+                continue
+            if not _all_species_selected(selected_species) and not species_ok and "Alimentación animal" not in selected_species:
+                continue
+            if score < 4:
+                continue
+        elif category == "science":
+            if score < 5:
+                continue
+        else:
+            if not _official_domain(item.get("url", "")):
+                continue
+            if not topic_hit:
+                continue
+            if not _all_species_selected(selected_species) and not species_ok and "Alimentación animal" not in selected_species:
+                continue
+            if mentions_only_other_species(text, selected_species, category):
+                continue
+            if score < 10:
+                continue
 
-    out.sort(key=lambda x: (x.get("score", 0), x.get("published", "")), reverse=True)
-    return out
+        enriched = dict(item)
+        enriched["score"] = score
+        ranked.append((score, enriched))
 
-
-def _sort_science(records: List[dict], profile: dict) -> List[dict]:
-    out = []
-    primary_terms = profile["species_terms"]
-    topic_terms = profile["topic_aliases"] + profile["science_terms"][:8]
-    support_terms = SCIENCE_ANCHORS
-    for item in records:
-        text = " ".join([item.get("title", ""), item.get("snippet", ""), item.get("source", "")])
-        score = _score_text(text, primary_terms, topic_terms, support_terms)
-        if item.get("doi"):
-            score += 0.4
-        if item.get("source_db") == "OpenAlex":
-            score += 0.2
-        out.append({**item, "score": round(score, 3)})
-    out.sort(key=lambda x: (x.get("score", 0), x.get("published", "")), reverse=True)
-    return out
+    ranked.sort(key=lambda x: (x[0], x[1].get("published", "")), reverse=True)
+    return [item for _, item in ranked[:max_results]]
 
 
-# -----------------------------------------------------------------------------
-# Search orchestration
-# -----------------------------------------------------------------------------
 
-def search_market(species: str, profile: dict, start_date: date, end_date: date, max_results: int) -> Tuple[List[dict], List[str]]:
-    queries = build_market_queries(species, profile)
+def search_market(selected_species: Sequence[str], selected_topics: Sequence[str], start_date: date, end_date: date, max_results: int) -> List[dict]:
+    queries = build_queries(selected_species, selected_topics, "market")
     records: List[dict] = []
-
-    for query in queries[:4]:
-        try:
-            records.extend(search_google_news(query, start_date, end_date, max_results=max_results))
-        except Exception:
-            pass
-
-    for query in queries[:5]:
-        try:
-            records.extend(search_duckduckgo_html(query, max_results=6))
-        except Exception:
-            pass
-
-    try:
-        records.extend(search_mapa_market_portal())
-    except Exception:
-        pass
-
-    try:
-        rss_records = search_mapa_news_rss()
-        records.extend(item for item in rss_records if _date_in_range(_parse_date(item.get("published")), start_date, end_date))
-    except Exception:
-        pass
-
-    ranked = _sort_market(_dedupe(records), profile, start_date, end_date)
-    filtered = [item for item in ranked if item.get("score", 0) >= 0.3 and item.get("url")]
-    return filtered[:max_results], queries
-
-
-def search_regulation(species: str, profile: dict, start_date: date, end_date: date, max_results: int) -> Tuple[List[dict], List[str]]:
-    queries = build_regulation_queries(species, profile)
-    records: List[dict] = []
-
     for query in queries:
         try:
-            records.extend(search_duckduckgo_html(query, max_results=8))
+            records.extend(search_google_news(query, start_date, end_date, max_results=6))
         except Exception:
             pass
-
-    try:
-        records.extend(search_mapa_legislation_index())
-    except Exception:
-        pass
-
-    try:
-        official_news = search_google_news(f"site:mapa.gob.es {profile['species_terms'][0]} {profile['regulation_terms'][0] if profile['regulation_terms'] else profile['topic_aliases'][0]}", start_date, end_date, max_results=6)
-        records.extend(official_news)
-    except Exception:
-        pass
-
-    ranked = _sort_regulation(_dedupe(records), profile)
-    filtered = [item for item in ranked if item.get("score", 0) >= 1.1 and item.get("url")]
-    return filtered[:max_results], queries
+        try:
+            records.extend(search_duckduckgo_web(query, max_results=5))
+        except Exception:
+            pass
+    return filter_and_rank(records, "market", selected_species, selected_topics, max_results)
 
 
-def search_science(species: str, profile: dict, start_date: date, end_date: date, max_results: int) -> Tuple[List[dict], Dict[str, str]]:
-    queries = build_science_queries(species, profile)
+
+def search_science(selected_species: Sequence[str], selected_topics: Sequence[str], start_date: date, end_date: date, max_results: int) -> List[dict]:
+    queries = build_queries(selected_species, selected_topics, "science")
     records: List[dict] = []
+    for query in queries:
+        try:
+            records.extend(search_openalex(query, start_date, end_date, max_results=6))
+        except Exception:
+            pass
+        try:
+            records.extend(search_europe_pmc(query, start_date, end_date, max_results=6))
+        except Exception:
+            pass
+    return filter_and_rank(records, "science", selected_species, selected_topics, max_results)
+
+
+
+def search_regulation(selected_species: Sequence[str], selected_topics: Sequence[str], start_date: date, end_date: date, max_results: int) -> List[dict]:
+    queries = build_queries(selected_species, selected_topics, "regulation")
+    records: List[dict] = []
+    for query in queries:
+        try:
+            records.extend(search_duckduckgo_web(query, max_results=8))
+        except Exception:
+            pass
+        try:
+            records.extend(search_google_news(query, start_date, end_date, max_results=5))
+        except Exception:
+            pass
+    return filter_and_rank(records, "regulation", selected_species, selected_topics, max_results)
+
+
+
+def run_search(
+    selected_species: Sequence[str],
+    market_topics: Sequence[str],
+    science_topics: Sequence[str],
+    reg_topics: Sequence[str],
+    start_date: date,
+    end_date: date,
+    max_results: int,
+    only_category: Optional[str] = None,
+    existing: Optional[Dict[str, List[dict]]] = None,
+) -> Dict[str, List[dict]]:
+    results = existing or {"market": [], "science": [], "regulation": []}
+    if only_category in (None, "market"):
+        results["market"] = search_market(selected_species, market_topics, start_date, end_date, max_results) if market_topics else []
+    if only_category in (None, "science"):
+        results["science"] = search_science(selected_species, science_topics, start_date, end_date, max_results) if science_topics else []
+    if only_category in (None, "regulation"):
+        results["regulation"] = search_regulation(selected_species, reg_topics, start_date, end_date, max_results) if reg_topics else []
+    return results
+
+
+
+def flatten_results(results: Dict[str, List[dict]]) -> List[dict]:
+    rows: List[dict] = []
+    for category, items in results.items():
+        for item in items:
+            enriched = dict(item)
+            enriched["category"] = CATEGORY_LABELS[category]
+            rows.append(enriched)
+    return rows
+
+
+
+def corpus_text(results: Dict[str, List[dict]], limit_per_category: int = 8) -> str:
+    lines = []
+    for category in ["market", "science", "regulation"]:
+        lines.append(f"\n## {CATEGORY_LABELS[category]}\n")
+        for idx, item in enumerate(results.get(category, [])[:limit_per_category], start=1):
+            lines.append(
+                f"[{idx}] {item.get('title', '')}\n"
+                f"Fuente: {item.get('source', '')}\n"
+                f"Fecha: {item.get('published', '')[:10]}\n"
+                f"Resumen: {item.get('snippet', '')}\n"
+                f"URL: {item.get('url', '')}\n"
+            )
+    return "\n".join(lines)
+
+
+
+def llm_is_available() -> bool:
+    return bool(os.getenv("OPENAI_API_KEY")) and OpenAI is not None
+
+
+
+def call_openai(system_prompt: str, user_prompt: str) -> str:
+    if not llm_is_available():
+        raise RuntimeError("No hay configuración de OpenAI disponible.")
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     try:
-        records.extend(search_europe_pmc(queries["europepmc"], start_date, end_date, max_results=max_results))
+        response = client.responses.create(model=model, instructions=system_prompt, input=user_prompt)
+        if getattr(response, "output_text", None):
+            return response.output_text.strip()
     except Exception:
         pass
-    try:
-        records.extend(search_openalex(queries["broad"], start_date, end_date, max_results=max_results))
-    except Exception:
-        pass
-
-    ranked = _sort_science(_dedupe(records), profile)
-    filtered = [item for item in ranked if item.get("score", 0) >= 0.2 and item.get("url")]
-    return filtered[:max_results], queries
-
-
-def run_search(species: str, topics: Sequence[str], start_date: date, end_date: date, max_results: int) -> Tuple[Dict[str, List[dict]], Dict[str, object]]:
-    profile = build_search_profile(species, topics)
-    market_results, market_queries = search_market(species, profile, start_date, end_date, max_results)
-    science_results, science_queries = search_science(species, profile, start_date, end_date, max_results)
-    regulation_results, regulation_queries = search_regulation(species, profile, start_date, end_date, max_results)
-
-    return (
-        {
-            "market": market_results,
-            "science": science_results,
-            "regulation": regulation_results,
-        },
-        {
-            "profile": profile,
-            "market_queries": market_queries,
-            "science_queries": science_queries,
-            "regulation_queries": regulation_queries,
-        },
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.2,
     )
+    return (response.choices[0].message.content or "").strip()
 
 
-# -----------------------------------------------------------------------------
-# Rendering and analysis
-# -----------------------------------------------------------------------------
 
-def format_date(value: str) -> str:
-    dt = _parse_date(value)
-    if not dt:
-        return ""
-    return dt.strftime("%d/%m/%Y")
+def extractive_brief(
+    selected_species: Sequence[str],
+    selected_market_topics: Sequence[str],
+    selected_science_topics: Sequence[str],
+    selected_reg_topics: Sequence[str],
+    results: Dict[str, List[dict]],
+    company_context: str,
+) -> str:
+    flat = flatten_results(results)
+    if not flat:
+        return "No hay resultados suficientes para elaborar el briefing."
 
+    corpus = " ".join((item.get("title", "") + " " + item.get("snippet", "")) for item in flat)
+    hot_terms = _keywords_from_text(corpus, top_k=12)
+    species_text = ", ".join(selected_species) if selected_species else "All species"
 
-def render_result_list(records: List[dict], title: str) -> None:
-    st.subheader(title)
-    if not records:
-        st.info("No se han recuperado resultados relevantes con los filtros actuales.")
-        return
-
-    for idx, item in enumerate(records, start=1):
-        title_line = item.get("title", "Sin título")
-        source = item.get("source") or item.get("source_db") or "Fuente"
-        published = format_date(item.get("published", ""))
-        score = item.get("score")
-        meta = source
-        if published:
-            meta += f" · {published}"
-        if score is not None:
-            meta += f" · score {score:.2f}"
-        with st.expander(f"{idx}. {title_line}"):
-            st.caption(meta)
-            if item.get("snippet"):
-                st.write(item["snippet"])
-            if item.get("url"):
-                st.markdown(f"[Abrir fuente]({item['url']})")
-            if item.get("authors"):
-                st.caption(item["authors"])
-
-
-def render_query_debug(query_meta: Dict[str, object]) -> None:
-    with st.expander("Transparencia de consultas y criterios", expanded=False):
-        profile = query_meta.get("profile", {})
-        st.markdown("**Especie y temas seleccionados**")
-        st.write(profile.get("species_terms", [])[:4])
-        st.write(profile.get("selected_topics", []))
-
-        st.markdown("**Consultas de mercado**")
-        st.code("\n".join(query_meta.get("market_queries", [])), language="text")
-
-        st.markdown("**Consultas científicas**")
-        science_queries = query_meta.get("science_queries", {})
-        st.code(
-            f"OpenAlex: {science_queries.get('openalex', '')}\n\n"
-            f"Europe PMC: {science_queries.get('europepmc', '')}\n\n"
-            f"Consulta amplia: {science_queries.get('broad', '')}",
-            language="text",
-        )
-
-        st.markdown("**Consultas regulatorias**")
-        st.code("\n".join(query_meta.get("regulation_queries", [])), language="text")
-
-
-# -----------------------------------------------------------------------------
-# Briefing and chat
-# -----------------------------------------------------------------------------
-
-def _category_summary(category: str, records: List[dict], profile: dict) -> str:
-    if not records:
-        return f"En **{CATEGORY_LABELS[category]}** no se han recuperado señales suficientemente relevantes con los filtros actuales."
-
-    combined_text = " ".join((r.get("title", "") + " " + r.get("snippet", "")) for r in records[:8])
-    recurring = _keywords_from_text(combined_text, exclude=profile["species_terms"] + profile["topic_aliases"], top_k=6)
-    recurring_text = ", ".join(recurring[:4]) if recurring else "sin un patrón terminológico dominante"
-    sources = ", ".join(_unique_keep_order((r.get("source") or r.get("source_db") or "Fuente") for r in records[:4]))
-    return (
-        f"En **{CATEGORY_LABELS[category]}** se han recuperado **{len(records)}** referencias. "
-        f"Los focos que más se repiten son **{recurring_text}**. "
-        f"Las fuentes mejor posicionadas proceden de **{sources}**."
-    )
-
-
-def _integrated_insight(species: str, topics: Sequence[str], results: Dict[str, List[dict]]) -> str:
-    topic_text = ", ".join(topics)
-    market_n = len(results.get("market", []))
-    science_n = len(results.get("science", []))
-    reg_n = len(results.get("regulation", []))
-
-    strongest = []
-    if market_n:
-        strongest.append("la prensa sectorial y los boletines oficiales están generando señales de mercado accionables")
-    if science_n:
-        strongest.append("la literatura científica aporta base técnica para convertir esas señales en propuestas de valor")
-    if reg_n:
-        strongest.append("la capa regulatoria introduce condicionantes que pueden acelerar o frenar la adopción")
-
-    if not strongest:
-        strongest.append("la consulta necesita un rango temporal más amplio o una combinación distinta de temas")
-
-    joined = "; ".join(strongest)
-    return (
-        f"Para **{species}**, en los temas **{topic_text}**, el radar sugiere que **{joined}**. "
-        f"La lectura útil para marketing no es solo qué se publica, sino qué problema del cliente está detrás de cada señal y qué solución de Nutreco Iberia puede encajar mejor."
-    )
-
-
-def _recommendations_for_marketing(species: str, topics: Sequence[str], results: Dict[str, List[dict]]) -> List[str]:
-    topic_text = ", ".join(topics[:3])
-    recommendations = [
-        f"Traducir las señales detectadas en **{species}** sobre **{topic_text}** a un argumentario técnico-comercial para red de ventas y equipo técnico.",
-        "Priorizar contenido útil para cliente final: briefing comercial, ficha técnica, webinar o visita con foco en la necesidad observada.",
-        "Cruzar las señales externas con feedback de campo para validar si el problema es coyuntural o estructural antes de mover portfolio o claims.",
-        "Convertir cada novedad regulatoria relevante en un mensaje simple de impacto para cliente: qué cambia, a quién afecta y qué respuesta puede ofrecer Nutreco Iberia.",
-        "Identificar huecos del portfolio actual y decidir si conviene reposicionar una solución existente, generar servicio técnico o explorar desarrollo de producto.",
-    ]
-    if results.get("market"):
-        recommendations.append("Monitorizar semanalmente las fuentes de mercado mejor posicionadas y comparar la señal con precios, costes y presión competitiva.")
-    if results.get("science"):
-        recommendations.append("Usar la evidencia científica recuperada como soporte de diferenciación, siempre contrastando aplicabilidad práctica en granja.")
-    if results.get("regulation"):
-        recommendations.append("Revisar con antelación las obligaciones regulatorias detectadas para evitar mensajes comerciales o recomendaciones técnicas que queden desalineadas.")
-    return _unique_keep_order(recommendations)[:6]
-
-
-def generate_brief(species: str, topics: Sequence[str], start_date: date, end_date: date, results: Dict[str, List[dict]], company_context: str, query_meta: Dict[str, object]) -> str:
-    profile = query_meta.get("profile", build_search_profile(species, topics))
     lines = [
-        "# Briefing del radar sectorial",
-        "",
-        f"**Especie / segmento:** {species}",
-        f"**Temas seleccionados:** {', '.join(topics)}",
-        f"**Periodo analizado:** {start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}",
+        f"# Briefing radar | {species_text}",
         "",
         "## Resumen ejecutivo",
-        _integrated_insight(species, topics, results),
+        f"Se han revisado **{len(results.get('market', []))}** señales de mercado/noticias, **{len(results.get('science', []))}** referencias científico-técnicas y **{len(results.get('regulation', []))}** referencias regulatorias.",
+        f"Especies/segmentos analizados: **{species_text}**.",
+        f"Temas seleccionados en mercado: {', '.join(selected_market_topics[:6]) if selected_market_topics else 'sin selección'}.",
+        f"Temas seleccionados en científico-técnico: {', '.join(selected_science_topics[:6]) if selected_science_topics else 'sin selección'}.",
+        f"Temas seleccionados en regulación: {', '.join(selected_reg_topics[:6]) if selected_reg_topics else 'sin selección'}.",
+        f"Señales repetidas en las fuentes recuperadas: {', '.join(hot_terms[:8]) if hot_terms else 'sin patrón claro'}.",
         "",
-        "## Síntesis integrada del radar",
-        f"Entre las tres capas de búsqueda, el radar ha recuperado **{len(results.get('market', []))}** señales de mercado, **{len(results.get('science', []))}** referencias científico-técnicas y **{len(results.get('regulation', []))}** señales regulatorias. El valor para marketing está en priorizar necesidades del cliente que aparecen repetidamente y conectarlas con mensajes, servicios o soluciones de Nutreco Iberia.",
-        "",
-        "## Mercado",
-        _category_summary("market", results.get("market", []), profile),
-        "",
-        "## Científico-técnico",
-        _category_summary("science", results.get("science", []), profile),
-        "",
-        "## Legislación y regulación",
-        _category_summary("regulation", results.get("regulation", []), profile),
-        "",
-        "## Implicaciones para marketing y desarrollo de soluciones",
+        "## Lectura integrada para marketing",
+        "El radar debe leerse como una combinación de presión de mercado, evidencia técnica y restricciones regulatorias para traducir necesidades externas en productos, soluciones y argumentarios de Nutreco Iberia.",
     ]
 
-    for rec in _recommendations_for_marketing(species, topics, results):
-        lines.append(f"- {rec}")
+    if results.get("market"):
+        lines.extend(["", "## Mercado y noticias"]) 
+        for item in results["market"][:5]:
+            lines.append(f"- **{item['title']}** ({item.get('source', 'Fuente')}). {item.get('snippet', '')}")
+    else:
+        lines.extend(["", "## Mercado y noticias", "- No se han recuperado resultados suficientemente relevantes con la selección actual."])
 
-    lines.extend([
-        "",
-        "## Contexto corporativo aplicado",
-        company_context.strip() or DEFAULT_COMPANY_CONTEXT.strip(),
-    ])
+    if results.get("science"):
+        lines.extend(["", "## Evidencia científico-técnica"]) 
+        for item in results["science"][:5]:
+            source = item.get("journal") or item.get("source", "Fuente científica")
+            lines.append(f"- **{item['title']}** ({source}). {item.get('snippet', '')}")
+    else:
+        lines.extend(["", "## Evidencia científico-técnica", "- No se han recuperado publicaciones suficientemente relevantes con la selección actual."])
+
+    if results.get("regulation"):
+        lines.extend(["", "## Legislación y regulación"]) 
+        for item in results["regulation"][:5]:
+            lines.append(f"- **{item['title']}** ({item.get('source', 'Fuente oficial')}). {item.get('snippet', '')}")
+    else:
+        lines.extend(["", "## Legislación y regulación", "- No se han recuperado referencias regulatorias suficientemente relevantes con la selección actual."])
+
+    lines.extend(
+        [
+            "",
+            "## Implicaciones preliminares para Nutreco Iberia",
+            "- Revisar si las señales de mercado justifican mensajes, soluciones o argumentarios específicos por especie o de forma transversal en alimentación animal.",
+            "- Contrastar las oportunidades de producto con la evidencia científico-técnica más sólida antes de priorizar un claim o una propuesta de valor.",
+            "- Verificar la viabilidad regulatoria de cada solución potencial antes de cualquier despliegue comercial.",
+            "- Priorizar vigilancia continua en los temas con presencia simultánea en mercado, ciencia y regulación.",
+            "",
+            "## Contexto corporativo utilizado",
+            company_context.strip(),
+        ]
+    )
     return "\n".join(lines)
+
+
+
+def generate_brief(
+    selected_species: Sequence[str],
+    selected_market_topics: Sequence[str],
+    selected_science_topics: Sequence[str],
+    selected_reg_topics: Sequence[str],
+    results: Dict[str, List[dict]],
+    company_context: str,
+) -> str:
+    if not llm_is_available():
+        return extractive_brief(
+            selected_species,
+            selected_market_topics,
+            selected_science_topics,
+            selected_reg_topics,
+            results,
+            company_context,
+        )
+
+    system_prompt = (
+        "Eres un analista senior de inteligencia de mercado, ciencia aplicada y regulación para nutrición animal. "
+        "Usa solo el corpus suministrado. No inventes datos. Escribe en español con tono ejecutivo y práctico."
+    )
+    user_prompt = f"""
+Especies/segmentos: {', '.join(selected_species) if selected_species else 'All species'}
+Temas de mercado: {', '.join(selected_market_topics)}
+Temas científico-técnicos: {', '.join(selected_science_topics)}
+Temas regulatorios: {', '.join(selected_reg_topics)}
+
+Contexto corporativo:
+{company_context}
+
+Corpus:
+{corpus_text(results)}
+
+Estructura obligatoria:
+1. Resumen ejecutivo.
+2. Lectura integrada para marketing.
+3. Señales de mercado con implicaciones de portafolio.
+4. Hallazgos científico-técnicos con posible traducción a soluciones.
+5. Implicaciones regulatorias.
+6. Recomendaciones priorizadas para Nutreco Iberia.
+7. Riesgos, vacíos y siguientes preguntas.
+"""
+    return call_openai(system_prompt, user_prompt)
+
 
 
 def bibliography_entries(results: Dict[str, List[dict]]) -> List[str]:
-    entries = []
-    for category in ["market", "science", "regulation"]:
-        for item in results.get(category, []):
-            title = item.get("title", "Sin título")
-            source = item.get("source") or item.get("source_db") or "Fuente"
-            published = format_date(item.get("published", ""))
-            url = item.get("url", "")
-            ref = f"{title}. {source}"
-            if published:
-                ref += f", {published}"
-            if url:
-                ref += f". {url}"
-            entries.append(ref)
-    return _unique_keep_order(entries)
+    entries: List[str] = []
+    for item in flatten_results(results):
+        published = (item.get("published") or "")[:10] or "s/f"
+        if item.get("category") == CATEGORY_LABELS["science"]:
+            authors = item.get("authors") or "Autoría no disponible"
+            journal = item.get("journal") or item.get("source") or "Fuente científica"
+            doi_or_url = item.get("doi") or item.get("url", "")
+            entries.append(f"{authors}. ({published}). {item.get('title')}. {journal}. {doi_or_url}")
+        else:
+            entries.append(f"{item.get('source', 'Fuente no indicada')}. ({published}). {item.get('title')}. {item.get('url', '')}")
+    return entries
 
 
-def build_docx_bytes(species: str, topics: Sequence[str], start_date: date, end_date: date, brief_text: str, results: Dict[str, List[dict]]) -> bytes:
+
+def build_docx_bytes(
+    selected_species: Sequence[str],
+    selected_market_topics: Sequence[str],
+    selected_science_topics: Sequence[str],
+    selected_reg_topics: Sequence[str],
+    start_date: date,
+    end_date: date,
+    company_context: str,
+    brief_text: str,
+    results: Dict[str, List[dict]],
+) -> bytes:
     doc = Document()
-    doc.add_heading("Radar sectorial Nutreco Iberia", level=0)
-    doc.add_paragraph(f"Especie / segmento: {species}")
-    doc.add_paragraph(f"Temas seleccionados: {', '.join(topics)}")
-    doc.add_paragraph(f"Periodo: {start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}")
+    species_text = ", ".join(selected_species) if selected_species else "All species"
+    doc.add_heading(f"Radar sectorial | {species_text}", level=0)
+    doc.add_paragraph(f"Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    doc.add_paragraph(f"Intervalo analizado: {start_date.isoformat()} a {end_date.isoformat()}")
+    doc.add_paragraph(f"Mercado/noticias: {', '.join(selected_market_topics) if selected_market_topics else 'Sin selección'}")
+    doc.add_paragraph(f"Científico-técnico: {', '.join(selected_science_topics) if selected_science_topics else 'Sin selección'}")
+    doc.add_paragraph(f"Regulación: {', '.join(selected_reg_topics) if selected_reg_topics else 'Sin selección'}")
 
-    for line in brief_text.splitlines():
-        if line.startswith("# "):
-            doc.add_heading(line[2:].strip(), level=1)
-        elif line.startswith("## "):
-            doc.add_heading(line[3:].strip(), level=2)
-        elif line.startswith("- "):
-            doc.add_paragraph(line[2:].strip(), style="List Bullet")
-        elif line.strip():
-            doc.add_paragraph(line.strip())
+    doc.add_heading("Briefing", level=1)
+    for paragraph in brief_text.split("\n"):
+        clean = paragraph.strip()
+        if not clean:
+            doc.add_paragraph("")
+            continue
+        if clean.startswith("# "):
+            doc.add_heading(clean[2:], level=1)
+        elif clean.startswith("## "):
+            doc.add_heading(clean[3:], level=2)
+        elif clean.startswith("- "):
+            doc.add_paragraph(clean[2:], style="List Bullet")
+        else:
+            doc.add_paragraph(clean)
 
-    doc.add_heading("Referencias", level=1)
-    for ref in bibliography_entries(results):
-        doc.add_paragraph(ref, style="List Bullet")
+    doc.add_heading("Contexto corporativo aplicado", level=1)
+    doc.add_paragraph(company_context.strip())
 
-    output = io.BytesIO()
-    doc.save(output)
-    output.seek(0)
-    return output.getvalue()
-
-
-def answer_chat(question: str, results: Dict[str, List[dict]], species: str, topics: Sequence[str]) -> str:
-    question_terms = [t for t in re.findall(r"[A-Za-zÁÉÍÓÚáéíóúÑñÜü0-9\-]{4,}", question) if _normalize(t) not in STOPWORDS]
-    candidates = []
+    doc.add_heading("Fuentes recuperadas", level=1)
     for category in ["market", "science", "regulation"]:
-        for item in results.get(category, []):
-            text = " ".join([item.get("title", ""), item.get("snippet", ""), item.get("source", "")])
-            hits = sum(1 for term in question_terms if _normalize(term) in _normalize(text))
-            if hits > 0:
-                candidates.append((hits, category, item))
+        doc.add_heading(CATEGORY_LABELS[category], level=2)
+        items = results.get(category, [])
+        if not items:
+            doc.add_paragraph("Sin resultados.")
+            continue
+        for item in items:
+            p = doc.add_paragraph(style="List Bullet")
+            p.add_run(item.get("title", "Sin título")).bold = True
+            p.add_run(f" | {item.get('source', 'Fuente')} | {str(item.get('published', ''))[:10]}\n")
+            p.add_run(item.get("snippet", ""))
+            if item.get("url"):
+                p.add_run(f"\n{item['url']}")
 
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    if not candidates:
-        return (
-            f"No veo una coincidencia directa entre tu pregunta y los resultados recuperados para **{species}** en **{', '.join(topics)}**. "
-            "Prueba a reformular la pregunta en términos de mercado, ciencia o regulación."
-        )
+    doc.add_heading("Referencias bibliográficas / documentales", level=1)
+    for entry in bibliography_entries(results):
+        doc.add_paragraph(entry, style="List Number")
 
-    selected = candidates[:4]
-    lines = [
-        f"Para **{species}** y los temas **{', '.join(topics)}**, esto es lo más relevante que encuentro en los resultados actuales:",
-        "",
-    ]
-    for _, category, item in selected:
-        source = item.get("source") or item.get("source_db") or "Fuente"
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+
+def render_results(items: List[dict], empty_text: str) -> None:
+    if not items:
+        st.info(empty_text)
+        return
+    for item in items:
+        title = item.get("title", "Sin título")
         url = item.get("url", "")
-        line = f"- **{CATEGORY_LABELS[category]}**: {item.get('title', 'Sin título')} ({source})"
-        if url:
-            line += f" — {url}"
-        lines.append(line)
-    return "\n".join(lines)
+        source = item.get("source", "Fuente")
+        published = (item.get("published") or "")[:10] or "s/f"
+        score = item.get("score", "")
+        with st.container():
+            if url:
+                st.markdown(f"**[{title}]({url})**")
+            else:
+                st.markdown(f"**{title}**")
+            st.caption(f"{source} | {published} | Relevancia interna: {score}")
+            st.write(item.get("snippet", ""))
+            with st.expander("Ver metadatos"):
+                st.write({
+                    "query": item.get("query", ""),
+                    "motor": item.get("search_engine", ""),
+                    "url": url,
+                })
+            st.markdown("---")
 
 
-# -----------------------------------------------------------------------------
-# App state and README
-# -----------------------------------------------------------------------------
+
+def load_readme_text() -> str:
+    readme_path = os.path.join(os.path.dirname(__file__), "README.md")
+    if os.path.exists(readme_path):
+        with open(readme_path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    return "README no disponible."
+
+
 
 def init_state() -> None:
-    st.session_state.setdefault("search_results", None)
-    st.session_state.setdefault("query_meta", None)
+    st.session_state.setdefault("search_results", {"market": [], "science": [], "regulation": []})
     st.session_state.setdefault("brief_text", "")
-    st.session_state.setdefault("chat_history", [])
+    st.session_state.setdefault("last_filters", {})
 
 
-def read_readme() -> str:
-    path = Path(__file__).with_name("README.md")
-    if not path.exists():
-        return "README no disponible."
-    return path.read_text(encoding="utf-8")
+
+def reset_state() -> None:
+    st.session_state["search_results"] = {"market": [], "science": [], "regulation": []}
+    st.session_state["brief_text"] = ""
+    st.session_state["last_filters"] = {}
 
 
-# -----------------------------------------------------------------------------
-# Main UI
-# -----------------------------------------------------------------------------
+
+def summary_metrics(results: Dict[str, List[dict]]) -> pd.DataFrame:
+    rows = []
+    for category in ["market", "science", "regulation"]:
+        items = results.get(category, [])
+        rows.append(
+            {
+                "Bloque": CATEGORY_LABELS[category],
+                "Resultados": len(items),
+                "Fuentes distintas": len({item.get('source', '') for item in items}),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -1289,120 +1194,230 @@ def main() -> None:
 
     st.title(APP_TITLE)
     st.caption(
-        "Herramienta para marketing técnico: combina prensa sectorial, boletines oficiales, literatura científica y normativa "
-        "para ayudar a detectar necesidades del mercado y convertirlas en oportunidades de producto, servicio o posicionamiento para Nutreco Iberia."
+        "Radar para el departamento de marketing: convierte señales de mercado, evidencia técnica y novedades regulatorias en oportunidades de producto, soluciones y argumentario para Nutreco Iberia."
     )
 
     with st.sidebar:
-        st.header("Filtros")
-        species = st.selectbox("Especie / segmento", list(SPECIES_OPTIONS.keys()), index=0)
-        topics = st.multiselect(
-            "Temas a vigilar",
-            list(TOPIC_OPTIONS.keys()),
-            default=["Precios y cotizaciones", "Costes de alimentación"],
-            max_selections=3,
-            help="Selecciona hasta 3 temas. La app ya no usa texto libre para evitar búsquedas poco consistentes.",
+        st.header("1. Alcance del radar")
+        species_selection = st.multiselect(
+            "Especies / segmentos",
+            options=list(SPECIES_PROFILES.keys()),
+            default=["Alimentación animal"],
+            help="Puedes seleccionar una o varias especies. Si eliges 'All species', la búsqueda será transversal.",
         )
         today = date.today()
-        start_date = st.date_input("Fecha inicio", value=today.replace(day=1))
+        default_start = date(today.year, max(1, today.month - 3), 1)
+        start_date = st.date_input("Fecha inicio", value=default_start)
         end_date = st.date_input("Fecha fin", value=today)
-        max_results = st.slider("Máximo de resultados por bloque", min_value=5, max_value=25, value=12, step=1)
-        company_context = st.text_area("Criterios internos / foco de negocio", value=DEFAULT_COMPANY_CONTEXT, height=140)
-        run_button = st.button("Buscar y actualizar radar", use_container_width=True)
-        generate_button = st.button("Generar briefing", use_container_width=True)
+        max_results = st.slider("Máximo de resultados por bloque", min_value=8, max_value=30, value=16, step=1)
+        company_context = st.text_area(
+            "Contexto corporativo / criterio de lectura",
+            value=DEFAULT_COMPANY_CONTEXT,
+            height=180,
+        )
+        col_a, col_b = st.columns(2)
+        search_all = col_a.button("Buscar todo el radar", use_container_width=True)
+        reset_button = col_b.button("Empezar de nuevo", use_container_width=True)
+
+    if reset_button:
+        reset_state()
+        st.success("Se ha limpiado la búsqueda anterior.")
 
     if start_date > end_date:
         st.error("La fecha inicial no puede ser posterior a la fecha final.")
         return
 
-    if not topics:
-        st.warning("Selecciona al menos un tema para lanzar la búsqueda.")
+    st.subheader("2. Propuestas de búsqueda por bloque")
+    st.write(
+        "Selecciona propuestas curadas. Cada selección lanza búsquedas más precisas que el antiguo campo libre y reduce ruido por especie y por tema."
+    )
 
-    if run_button and topics:
-        with st.spinner("Buscando señales de mercado, ciencia y regulación..."):
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        market_topics = st.multiselect(
+            f"Mercado y noticias ({len(MARKET_TOPICS)} opciones)",
+            options=list(MARKET_TOPICS.keys()),
+            default=DEFAULT_MARKET_SELECTION,
+            help="Selecciona una o varias necesidades de vigilancia de mercado.",
+        )
+        search_market_button = st.button("Buscar mercado / noticias", use_container_width=True)
+    with col2:
+        science_topics = st.multiselect(
+            f"Científico-técnico ({len(SCIENCE_TOPICS)} opciones)",
+            options=list(SCIENCE_TOPICS.keys()),
+            default=DEFAULT_SCIENCE_SELECTION,
+            help="Selecciona una o varias líneas científicas.",
+        )
+        search_science_button = st.button("Buscar científico-técnico", use_container_width=True)
+    with col3:
+        reg_topics = st.multiselect(
+            f"Legislación y regulación ({len(REG_TOPICS)} opciones)",
+            options=list(REG_TOPICS.keys()),
+            default=DEFAULT_REG_SELECTION,
+            help="Selecciona uno o varios frentes regulatorios.",
+        )
+        search_reg_button = st.button("Buscar regulación", use_container_width=True)
+
+    if not species_selection:
+        species_selection = ["All species"]
+
+    if search_all:
+        with st.spinner("Recuperando mercado, ciencia y regulación..."):
             try:
-                results, query_meta = run_search(species, topics, start_date, end_date, max_results)
-                st.session_state.search_results = results
-                st.session_state.query_meta = query_meta
+                st.session_state.search_results = run_search(
+                    species_selection,
+                    market_topics,
+                    science_topics,
+                    reg_topics,
+                    start_date,
+                    end_date,
+                    max_results,
+                    only_category=None,
+                    existing={"market": [], "science": [], "regulation": []},
+                )
                 st.session_state.brief_text = ""
-                st.session_state.chat_history = []
-                st.success("Radar actualizado.")
+                st.session_state.last_filters = {
+                    "species": species_selection,
+                    "market_topics": market_topics,
+                    "science_topics": science_topics,
+                    "reg_topics": reg_topics,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "company_context": company_context,
+                }
+                st.success("Radar actualizado en los tres bloques.")
             except Exception as exc:
                 st.error(f"No se pudo completar la búsqueda: {exc}")
 
-    results = st.session_state.search_results
-    query_meta = st.session_state.query_meta or {}
-
-    if results:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Mercado", len(results.get("market", [])))
-        c2.metric("Científico-técnico", len(results.get("science", [])))
-        c3.metric("Regulación", len(results.get("regulation", [])))
-
-        tabs = st.tabs(["Mercado", "Científico-técnico", "Legislación", "Chat", "Briefing", "Guía / README"])
-
-        with tabs[0]:
-            render_result_list(results.get("market", []), "Noticias, boletines y señales de mercado")
-            render_query_debug(query_meta)
-
-        with tabs[1]:
-            render_result_list(results.get("science", []), "Literatura científico-técnica")
-
-        with tabs[2]:
-            render_result_list(results.get("regulation", []), "Normativa, regulación y páginas oficiales")
-
-        with tabs[3]:
-            st.write("Utiliza el chat para interrogar únicamente los resultados recuperados por la app.")
-            for message in st.session_state.chat_history:
-                with st.chat_message(message["role"]):
-                    st.markdown(message["content"])
-            question = st.chat_input("Pregunta sobre las señales recuperadas")
-            if question:
-                st.session_state.chat_history.append({"role": "user", "content": question})
-                with st.chat_message("user"):
-                    st.markdown(question)
-                answer = answer_chat(question, results, species, topics)
-                with st.chat_message("assistant"):
-                    st.markdown(answer)
-                st.session_state.chat_history.append({"role": "assistant", "content": answer})
-
-        with tabs[4]:
-            if generate_button:
-                st.session_state.brief_text = generate_brief(species, topics, start_date, end_date, results, company_context, query_meta)
-            if st.session_state.brief_text:
-                st.markdown(st.session_state.brief_text)
-                docx_bytes = build_docx_bytes(species, topics, start_date, end_date, st.session_state.brief_text, results)
-                st.download_button(
-                    "Descargar informe Word (.docx)",
-                    data=docx_bytes,
-                    file_name=f"radar_{_normalize(species).replace(' ', '_')}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    if search_market_button:
+        with st.spinner("Buscando mercado y noticias..."):
+            try:
+                st.session_state.search_results = run_search(
+                    species_selection,
+                    market_topics,
+                    science_topics,
+                    reg_topics,
+                    start_date,
+                    end_date,
+                    max_results,
+                    only_category="market",
+                    existing=st.session_state.search_results,
                 )
-                with st.expander("Referencias bibliográficas y documentales"):
-                    for entry in bibliography_entries(results):
-                        url_match = re.search(r"(https?://\S+)$", entry)
-                        if url_match:
-                            url = url_match.group(1)
-                            text = entry[: entry.rfind(url)].strip().rstrip(".")
-                            st.markdown(f"- {text}. [Enlace]({url})")
-                        else:
-                            st.markdown(f"- {entry}")
-            else:
-                st.info("Pulsa **Generar briefing** para crear el resumen integrado y el informe Word.")
+                st.session_state.brief_text = ""
+                st.success("Bloque de mercado actualizado.")
+            except Exception as exc:
+                st.error(f"No se pudo completar la búsqueda de mercado: {exc}")
 
-        with tabs[5]:
-            st.markdown(read_readme())
-    else:
-        st.info(
-            "Selecciona una especie, marca los temas a vigilar y pulsa **Buscar y actualizar radar**. "
-            "La app está orientada a que marketing detecte señales del mercado y las convierta en decisiones sobre mensajes, soluciones y portfolio."
-        )
-        with st.expander("Guía de uso (README)"):
-            st.markdown(read_readme())
+    if search_science_button:
+        with st.spinner("Buscando evidencia científico-técnica..."):
+            try:
+                st.session_state.search_results = run_search(
+                    species_selection,
+                    market_topics,
+                    science_topics,
+                    reg_topics,
+                    start_date,
+                    end_date,
+                    max_results,
+                    only_category="science",
+                    existing=st.session_state.search_results,
+                )
+                st.session_state.brief_text = ""
+                st.success("Bloque científico-técnico actualizado.")
+            except Exception as exc:
+                st.error(f"No se pudo completar la búsqueda científica: {exc}")
+
+    if search_reg_button:
+        with st.spinner("Buscando normativa y regulación..."):
+            try:
+                st.session_state.search_results = run_search(
+                    species_selection,
+                    market_topics,
+                    science_topics,
+                    reg_topics,
+                    start_date,
+                    end_date,
+                    max_results,
+                    only_category="regulation",
+                    existing=st.session_state.search_results,
+                )
+                st.session_state.brief_text = ""
+                st.success("Bloque regulatorio actualizado.")
+            except Exception as exc:
+                st.error(f"No se pudo completar la búsqueda regulatoria: {exc}")
+
+    results = st.session_state.search_results
+    st.subheader("3. Resultado del radar")
+    metrics_df = summary_metrics(results)
+    st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+
+    tabs = st.tabs([
+        "Mercado y noticias",
+        "Científico-técnico",
+        "Legislación y regulación",
+        "Briefing e informe",
+        "README / ayuda",
+    ])
+
+    with tabs[0]:
+        st.caption("Prensa sectorial, boletines, noticias de mercado y actualizaciones institucionales relacionadas con la selección activa.")
+        render_results(results.get("market", []), "No hay resultados de mercado relevantes con la selección actual.")
+
+    with tabs[1]:
+        st.caption("Publicaciones científicas y técnicas priorizadas por especie/segmento y por propuesta curada de búsqueda.")
+        render_results(results.get("science", []), "No hay resultados científico-técnicos relevantes con la selección actual.")
+
+    with tabs[2]:
+        st.caption("Resultados regulatorios filtrados para evitar ruido de otras especies y priorizar dominios oficiales.")
+        render_results(results.get("regulation", []), "No hay resultados regulatorios relevantes con la selección actual.")
+
+    with tabs[3]:
+        col_l, col_r = st.columns([1, 1])
+        if col_l.button("Generar briefing", use_container_width=True):
+            try:
+                st.session_state.brief_text = generate_brief(
+                    species_selection,
+                    market_topics,
+                    science_topics,
+                    reg_topics,
+                    results,
+                    company_context,
+                )
+            except Exception as exc:
+                st.error(f"No se pudo generar el briefing: {exc}")
+
+        if st.session_state.brief_text:
+            st.markdown(st.session_state.brief_text)
+            docx_bytes = build_docx_bytes(
+                species_selection,
+                market_topics,
+                science_topics,
+                reg_topics,
+                start_date,
+                end_date,
+                company_context,
+                st.session_state.brief_text,
+                results,
+            )
+            col_r.download_button(
+                label="Descargar informe Word (.docx)",
+                data=docx_bytes,
+                file_name="radar_nutreco_iberia.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+            with st.expander("Referencias bibliográficas y documentales"):
+                for entry in bibliography_entries(results):
+                    st.markdown(f"- {entry}")
+        else:
+            st.info("Pulsa 'Generar briefing' cuando tengas resultados suficientes.")
+
+    with tabs[4]:
+        st.markdown(load_readme_text())
 
     st.divider()
     st.caption(
-        "Aviso: el radar sirve para vigilancia y priorización. No sustituye una revisión técnica, regulatoria o jurídica antes de tomar decisiones externas o formular claims."
+        "Aviso: el radar es una herramienta de vigilancia y priorización. Antes de usar cualquier conclusión en materiales externos, claims o recomendaciones comerciales, valida cada punto con la fuente primaria."
     )
 
 
