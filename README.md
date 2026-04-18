@@ -1,21 +1,40 @@
-# Radar sectorial Nutreco Iberia (Streamlit)
+adar de necesidades del mercado | Nutreco Iberia
 
-Aplicación para que el departamento de marketing pueda leer mejor las necesidades del mercado y traducir señales externas en oportunidades de producto, servicio, argumentario y soporte técnico.
+Aplicación Streamlit pensada para que el departamento tecnico-comercial-marketing lea el mercado con criterio técnico y regulatorio, y convierta esa lectura en oportunidades de producto, servicios y soluciones para Nutreco Iberia.
 
-La app combina tres capas:
+## Qué hace esta versión
 
-- **Mercado**: prensa sectorial, noticias, boletines oficiales y actualizaciones institucionales.
-- **Científico-técnico**: literatura científica pública.
-- **Legislación y regulación**: normativa y páginas oficiales.
+La app trabaja en tres bloques separados:
 
-## Qué ha cambiado en esta versión
+- **Mercado y noticias**
+- **Científico-técnico**
+- **Legislación y regulación**
 
-La app **ya no usa un campo libre de palabras clave**. En su lugar, utiliza una **selección cerrada de temas** para mejorar la consistencia de la búsqueda y reducir ruido.
+La lógica principal de esta versión es deliberadamente más guiada que antes:
 
-También añade un segmento específico de **"Alimentación animal"** para vigilar señales transversales de todas las especies ganaderas.
+- **ya no usa un campo libre de palabras clave**;
+- usa **propuestas curadas de búsqueda** por bloque;
+- permite **selección múltiple de especies**;
+- incorpora las opciones **All species** y **Alimentación animal**;
+- permite lanzar la búsqueda con un botón por bloque o con un botón para buscar todo el radar;
+- mantiene la exportación a **Word (.docx)**;
+- muestra el propio **README dentro de la app**.
 
-## Segmentos disponibles
+## Objetivo de negocio
 
+El radar no está pensado solo para “recoger información”. Su finalidad es ayudar a marketing a responder preguntas como estas:
+
+- qué necesidades de mercado aparecen con más fuerza,
+- qué tensiones económicas o sanitarias pueden abrir una oportunidad,
+- qué evidencias científico-técnicas pueden apoyar una solución,
+- qué límites regulatorios condicionan el posicionamiento,
+- y dónde puede tener sentido desarrollar, adaptar o priorizar un producto o servicio de Nutreco Iberia.
+
+## Especies y segmentos disponibles
+
+Se pueden seleccionar una o varias opciones al mismo tiempo:
+
+- All species
 - Alimentación animal
 - Avicultura de puesta
 - Avicultura de carne
@@ -26,105 +45,219 @@ También añade un segmento específico de **"Alimentación animal"** para vigil
 - Caprino
 - Cunicultura
 
-## Temas disponibles
+### Cómo interpretar dos opciones especiales
 
-La app ofrece más de 20 temas estructurados. Se pueden seleccionar hasta 3 por búsqueda:
+**All species**
+: realiza una lectura transversal del sector ganadero.
 
-- Precios y cotizaciones
-- Costes de alimentación
-- Materias primas y piensos
-- Rentabilidad y márgenes
-- Consumo y demanda
-- Exportación e importación
-- Bienestar animal
-- Bioseguridad
-- Sanidad animal
-- Antimicrobianos y resistencias
-- Vacunación y prevención
-- Trazabilidad y movimientos
-- Sostenibilidad y emisiones
-- Metano y huella de carbono
-- Calidad del producto
-- Reproducción y fertilidad
-- Salud intestinal
-- Micotoxinas
-- Salmonella
-- Coccidiosis
-- Mastitis
-- Peste porcina africana
-- Influenza aviar
-- Lengua azul
-- Etiquetado y comercialización
-- Normativa de alimentación animal
+**Alimentación animal**
+: orienta la vigilancia a noticias y referencias sobre piensos, nutrición animal, materias primas, aditivos, formulación y regulación feed, de manera genérica y multisectorial.
 
-## Cómo funciona
+## Propuestas curadas de búsqueda
 
-### 1. Mercado
-La búsqueda de mercado está pensada como radar de necesidades del cliente y del sector. Prioriza:
+Cada bloque incluye **más de 50 opciones** con selección múltiple.
 
-- noticias de prensa,
-- páginas institucionales del MAPA,
-- boletines y páginas de mercado,
-- medios especializados ganaderos.
+### 1. Mercado y noticias
+
+Ejemplos:
+
+- precios y cotizaciones,
+- boletines oficiales de precios,
+- coste del pienso,
+- materias primas y piensos,
+- cereales y energía,
+- harina de soja y proteínas,
+- rentabilidad y márgenes,
+- exportación,
+- importación,
+- comercio internacional,
+- logística y transporte,
+- sacrificio y mataderos,
+- precio de la leche,
+- precio del cerdo,
+- precio del pollo,
+- precio del huevo,
+- precio del vacuno,
+- precio del cordero,
+- sostenibilidad como driver de compra,
+- noticias del MAPA y del sector.
 
 ### 2. Científico-técnico
-La capa científica usa fuentes públicas como **Europe PMC** y **OpenAlex**.
 
-### 3. Regulación
-La capa regulatoria prioriza dominios oficiales y exige relevancia temática real para evitar ruido:
+Ejemplos:
+
+- nutrición y formulación,
+- eficiencia alimentaria,
+- salud intestinal,
+- probióticos,
+- prebióticos,
+- ácidos orgánicos,
+- enzimas,
+- aminoácidos,
+- micotoxinas,
+- calidad del agua,
+- bioseguridad y prevención,
+- reducción de antimicrobianos,
+- estrés térmico,
+- metano y huella de carbono,
+- salud ruminal,
+- mastitis y calidad de leche,
+- reproducción y fertilidad,
+- calidad del huevo,
+- coccidiosis,
+- salmonella,
+- influenza aviar,
+- peste porcina africana,
+- lengua azul,
+- parasitismo en pequeños rumiantes,
+- sensores y ganadería de precisión.
+
+### 3. Legislación y regulación
+
+Ejemplos:
+
+- bienestar animal,
+- bienestar en transporte,
+- bienestar en sacrificio,
+- bioseguridad y sanidad animal,
+- Ley de Sanidad Animal de la UE,
+- notificación obligatoria de enfermedades,
+- peste porcina africana,
+- influenza aviar,
+- lengua azul,
+- uso de antimicrobianos,
+- medicamentos veterinarios,
+- piensos medicamentosos,
+- higiene de los piensos,
+- aditivos para alimentación animal,
+- etiquetado de piensos,
+- contaminantes y residuos,
+- trazabilidad,
+- identificación y movimientos,
+- controles oficiales,
+- ayudas PAC y ecoesquemas,
+- emisiones de amoniaco,
+- metano y gases de efecto invernadero,
+- declaraciones y claims ambientales,
+- deforestación y materias primas importadas.
+
+## Motores de búsqueda usados
+
+### Mercado y noticias
+
+Combina resultados de:
+
+- **Google News RSS**
+- **DuckDuckGo Web Search**
+
+El objetivo aquí es cubrir:
+
+- prensa sectorial,
+- noticias generales relevantes,
+- boletines y páginas del MAPA,
+- y páginas con lectura de mercado útiles para marketing.
+
+### Científico-técnico
+
+Combina resultados de:
+
+- **OpenAlex**
+- **Europe PMC**
+
+Así se mejora bastante la recuperación frente a búsquedas científicas demasiado cerradas.
+
+### Legislación y regulación
+
+Usa búsquedas restringidas y filtradas para priorizar dominios oficiales como:
 
 - `boe.es`
 - `eur-lex.europa.eu`
 - `mapa.gob.es`
+- `aesan.gob.es`
 - `efsa.europa.eu`
-- otros dominios oficiales relacionados
+- `miteco.gob.es`
+- `sanidad.gob.es`
 
-## Flujo recomendado de uso
+Además, la app intenta filtrar ruido de otras especies y descarta resultados regulatorios que no parezcan normativos ni oficiales.
 
-1. Seleccionar especie o segmento.
-2. Escoger 1 a 3 temas.
-3. Definir el rango de fechas.
-4. Pulsar **Buscar y actualizar radar**.
-5. Revisar los bloques de mercado, ciencia y regulación.
-6. Utilizar el chat para interrogar los resultados ya recuperados.
-7. Generar el briefing integrado.
-8. Exportar el informe en Word para edición o presentación.
+## Cómo usar la app
 
-## Qué debe leer marketing en la salida
+### Flujo recomendado
 
-La app no está pensada solo para “ver noticias”. Está pensada para responder estas preguntas:
+1. Selecciona una o varias especies o segmentos.
+2. Define el intervalo de fechas.
+3. Elige propuestas de búsqueda en mercado, ciencia y regulación.
+4. Pulsa uno de estos botones:
+   - **Buscar mercado / noticias**
+   - **Buscar científico-técnico**
+   - **Buscar regulación**
+   - **Buscar todo el radar**
+5. Revisa cada pestaña de resultados.
+6. Genera el briefing.
+7. Descarga el informe Word si necesitas editarlo o presentarlo.
 
-- ¿Qué preocupación real está emergiendo en clientes y sector?
-- ¿Qué está empujando esa preocupación: precio, sanidad, regulación, demanda o sostenibilidad?
-- ¿Qué evidencia técnica ayuda a sostener una propuesta?
-- ¿Qué riesgo regulatorio condiciona el mensaje o la solución?
-- ¿Qué oportunidad concreta abre esto para Nutreco Iberia?
+### Cuándo usar “All species”
 
-## Exportación
+Úsalo cuando quieras una lectura macro del sector o cuando estés vigilando una tendencia transversal, por ejemplo:
 
-La app genera un briefing visible en pantalla y un informe en **Word (.docx)** con:
+- materias primas,
+- sostenibilidad,
+- claims ambientales,
+- feed additives,
+- presión regulatoria sobre emisiones,
+- tendencias de consumo.
 
-- resumen ejecutivo,
-- síntesis integrada,
-- lectura por bloque,
-- implicaciones para marketing,
-- referencias bibliográficas y documentales.
+### Cuándo usar “Alimentación animal”
 
-## Ejemplos útiles
+Úsalo cuando la vigilancia esté centrada en:
 
-- Porcino + Peste porcina africana
-- Avicultura de puesta + Precios y cotizaciones
-- Vacuno de leche + Mastitis
-- Ovino + Lengua azul
-- Alimentación animal + Materias primas y piensos
-- Alimentación animal + Normativa de alimentación animal
+- piensos,
+- formulación,
+- aditivos,
+- higiene feed,
+- claims de alimentación animal,
+- materias primas y costes feed,
+- soluciones aplicables a varias especies.
 
-## Limitaciones
+## Briefing
 
-1. La app ayuda a detectar y priorizar señales, pero no sustituye validación experta.
-2. La calidad del resultado depende de la disponibilidad pública de las fuentes.
-3. Algunas fuentes web pueden cambiar estructura y requerir ajustes futuros.
-4. No incorpora todavía fuentes internas privadas.
+La app puede generar un briefing integrando:
+
+- señales de mercado,
+- referencias científicas,
+- regulación,
+- e implicaciones preliminares para Nutreco Iberia.
+
+Sin `OPENAI_API_KEY`, el briefing es **extractivo**, pero funcional.
+
+Con `OPENAI_API_KEY`, la síntesis puede ser más rica.
+
+## Instalación local
+
+```bash
+python -m venv .venv
+source .venv/bin/activate   # En Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+## Ejecución
+
+```bash
+streamlit run main.py
+```
+
+## Dependencias
+
+Las dependencias actuales son:
+
+- streamlit
+- requests
+- feedparser
+- pandas
+- python-dateutil
+- beautifulsoup4
+- python-docx
+- openai
 
 ## Estructura mínima del repositorio
 
@@ -135,9 +268,19 @@ La app genera un briefing visible en pantalla y un informe en **Word (.docx)** c
 └── README.md
 ```
 
-## Ejecución local
+## Limitaciones actuales
 
-```bash
-pip install -r requirements.txt
-streamlit run main.py
-```
+1. **No sustituye validación experta.** La app ayuda a priorizar señales.
+2. **El bloque regulatorio sigue dependiendo de la indexación pública.** Es mejor que antes, pero no sustituye una base jurídica especializada.
+3. **La calidad del bloque de mercado depende de la visibilidad pública de prensa, boletines y páginas oficiales.**
+4. **La selección múltiple muy amplia puede ralentizar la búsqueda.** Conviene empezar por 2 a 5 propuestas por bloque.
+5. **No hay almacenamiento persistente ni histórico interno de búsquedas.**
+
+## Mejoras futuras razonables
+
+- histórico de búsquedas y comparativa temporal,
+- taxonomías propias de Nutreco Iberia,
+- alertas automáticas por tema,
+- fuentes sectoriales premium,
+- filtrado jurídico más estructurado,
+- y una capa de conocimiento interno corporativo.
