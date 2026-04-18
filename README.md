@@ -1,24 +1,22 @@
 # Radar sectorial Nutreco Iberia (Streamlit)
 
-Aplicación Streamlit para vigilar tres bloques de información por especie/segmento:
+Aplicación para que el departamento de marketing pueda leer mejor las necesidades del mercado y traducir señales externas en oportunidades de producto, servicio, argumentario y soporte técnico.
 
-- **Mercado**
-- **Científico-técnico**
-- **Legislación y regulación**
+La app combina tres capas:
 
-La app está pensada como base funcional para un radar interno. Permite:
+- **Mercado**: prensa sectorial, noticias, boletines oficiales y actualizaciones institucionales.
+- **Científico-técnico**: literatura científica pública.
+- **Legislación y regulación**: normativa y páginas oficiales.
 
-- elegir especie/segmento con un desplegable,
-- acotar por intervalo de fechas,
-- añadir palabras clave,
-- recuperar fuentes públicas,
-- conversar con la app para afinar el enfoque,
-- generar un briefing visible en pantalla,
-- exportar el resultado a **Word (.docx)**,
-- listar referencias bibliográficas y documentales al final del informe.
+## Qué ha cambiado en esta versión
 
-## Segmentos incluidos
+La app **ya no usa un campo libre de palabras clave**. En su lugar, utiliza una **selección cerrada de temas** para mejorar la consistencia de la búsqueda y reducir ruido.
 
+También añade un segmento específico de **"Alimentación animal"** para vigilar señales transversales de todas las especies ganaderas.
+
+## Segmentos disponibles
+
+- Alimentación animal
 - Avicultura de puesta
 - Avicultura de carne
 - Porcino
@@ -28,119 +26,105 @@ La app está pensada como base funcional para un radar interno. Permite:
 - Caprino
 - Cunicultura
 
-## Arquitectura resumida
+## Temas disponibles
+
+La app ofrece más de 20 temas estructurados. Se pueden seleccionar hasta 3 por búsqueda:
+
+- Precios y cotizaciones
+- Costes de alimentación
+- Materias primas y piensos
+- Rentabilidad y márgenes
+- Consumo y demanda
+- Exportación e importación
+- Bienestar animal
+- Bioseguridad
+- Sanidad animal
+- Antimicrobianos y resistencias
+- Vacunación y prevención
+- Trazabilidad y movimientos
+- Sostenibilidad y emisiones
+- Metano y huella de carbono
+- Calidad del producto
+- Reproducción y fertilidad
+- Salud intestinal
+- Micotoxinas
+- Salmonella
+- Coccidiosis
+- Mastitis
+- Peste porcina africana
+- Influenza aviar
+- Lengua azul
+- Etiquetado y comercialización
+- Normativa de alimentación animal
+
+## Cómo funciona
 
 ### 1. Mercado
-Búsqueda mediante **Google News RSS** con queries construidas a partir de:
+La búsqueda de mercado está pensada como radar de necesidades del cliente y del sector. Prioriza:
 
-- especie/segmento,
-- palabras clave del usuario,
-- términos asociados a mercado.
+- noticias de prensa,
+- páginas institucionales del MAPA,
+- boletines y páginas de mercado,
+- medios especializados ganaderos.
 
 ### 2. Científico-técnico
-Búsqueda en **Europe PMC** usando:
+La capa científica usa fuentes públicas como **Europe PMC** y **OpenAlex**.
 
-- especie/segmento,
-- palabras clave del usuario,
-- términos técnicos,
-- filtro por fecha.
+### 3. Regulación
+La capa regulatoria prioriza dominios oficiales y exige relevancia temática real para evitar ruido:
 
-### 3. Legislación y regulación
-Búsqueda de novedades regulatorias con query orientada a dominios oficiales, por ejemplo:
-
-- `eur-lex.europa.eu`
 - `boe.es`
+- `eur-lex.europa.eu`
 - `mapa.gob.es`
 - `efsa.europa.eu`
-- `miteco.gob.es`
+- otros dominios oficiales relacionados
 
-## Resumen y chat
+## Flujo recomendado de uso
 
-La app funciona en dos modos:
+1. Seleccionar especie o segmento.
+2. Escoger 1 a 3 temas.
+3. Definir el rango de fechas.
+4. Pulsar **Buscar y actualizar radar**.
+5. Revisar los bloques de mercado, ciencia y regulación.
+6. Utilizar el chat para interrogar los resultados ya recuperados.
+7. Generar el briefing integrado.
+8. Exportar el informe en Word para edición o presentación.
 
-### Sin clave de OpenAI
-Genera un briefing extractivo y respuestas básicas a preguntas sobre los resultados recuperados.
+## Qué debe leer marketing en la salida
 
-### Con clave de OpenAI
-La síntesis mejora sensiblemente. La app generará:
+La app no está pensada solo para “ver noticias”. Está pensada para responder estas preguntas:
+
+- ¿Qué preocupación real está emergiendo en clientes y sector?
+- ¿Qué está empujando esa preocupación: precio, sanidad, regulación, demanda o sostenibilidad?
+- ¿Qué evidencia técnica ayuda a sostener una propuesta?
+- ¿Qué riesgo regulatorio condiciona el mensaje o la solución?
+- ¿Qué oportunidad concreta abre esto para Nutreco Iberia?
+
+## Exportación
+
+La app genera un briefing visible en pantalla y un informe en **Word (.docx)** con:
 
 - resumen ejecutivo,
-- señales de mercado,
-- hallazgos científico-técnicos,
-- implicaciones regulatorias,
-- recomendaciones priorizadas para Nutreco Iberia,
-- riesgos, vacíos y preguntas abiertas.
+- síntesis integrada,
+- lectura por bloque,
+- implicaciones para marketing,
+- referencias bibliográficas y documentales.
 
-## Variables de entorno opcionales
+## Ejemplos útiles
 
-```bash
-OPENAI_API_KEY=tu_clave
-OPENAI_MODEL=gpt-4.1-mini
-```
+- Porcino + Peste porcina africana
+- Avicultura de puesta + Precios y cotizaciones
+- Vacuno de leche + Mastitis
+- Ovino + Lengua azul
+- Alimentación animal + Materias primas y piensos
+- Alimentación animal + Normativa de alimentación animal
 
-Si no defines estas variables, la aplicación seguirá funcionando, pero con una síntesis menos potente.
+## Limitaciones
 
-## Instalación local
-
-```bash
-python -m venv .venv
-source .venv/bin/activate   # En Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-## Ejecución
-
-```bash
-streamlit run main.py
-```
-
-## Flujo de uso recomendado
-
-1. Selecciona el segmento.
-2. Define el rango de fechas.
-3. Añade palabras clave.
-4. Pulsa **Buscar y actualizar radar**.
-5. Revisa los resultados por pestaña.
-6. Usa el chat para concretar dudas.
-7. Pulsa **Generar briefing**.
-8. Descarga el **.docx** para edición y presentación.
-
-## Ejemplos de búsqueda
-
-- `peste porcina africana`
-- `influenza aviar`
-- `precio leche y metano`
-- `lengua azul`
-- `costes de alimentación`
-- `bienestar animal`
-- `emisiones`
-- `salmonella`
-
-## Puntos fuertes de esta base
-
-- estructura clara para marketing técnico,
-- separación entre mercado, técnica y regulación,
-- exportación a Word,
-- referencias al final,
-- adaptable a GitHub y Streamlit Cloud.
-
-## Limitaciones actuales
-
-1. **No sustituye una revisión experta.** La app ayuda a detectar señales; no debe usarse como único soporte para decisiones regulatorias o claims.
-2. **La calidad del bloque regulatorio depende de la recuperabilidad pública.** Puede requerir un conector adicional o APIs específicas más adelante.
-3. **La calidad del resumen mejora con LLM.** Sin OpenAI, el briefing es útil pero más simple.
-4. **No incluye autenticación ni almacenamiento persistente.**
-5. **No incorpora todavía fuentes privadas internas** (SharePoint, Drive, bases documentales internas, etc.).
-
-## Siguientes mejoras recomendadas
-
-- añadir un fichero de configuración de fuentes por especie,
-- incorporar scoring de relevancia,
-- guardar histórico de búsquedas,
-- generar PDF además de Word,
-- incluir alertas automáticas por tema,
-- conectar bases internas o feeds corporativos,
-- añadir taxonomías propias de Nutreco Iberia para recomendaciones más finas.
+1. La app ayuda a detectar y priorizar señales, pero no sustituye validación experta.
+2. La calidad del resultado depende de la disponibilidad pública de las fuentes.
+3. Algunas fuentes web pueden cambiar estructura y requerir ajustes futuros.
+4. No incorpora todavía fuentes internas privadas.
 
 ## Estructura mínima del repositorio
 
@@ -151,20 +135,9 @@ streamlit run main.py
 └── README.md
 ```
 
-## Despliegue en GitHub / Streamlit Community Cloud
+## Ejecución local
 
-1. Crea un repositorio en GitHub.
-2. Sube `main.py`, `requirements.txt` y `README.md`.
-3. En Streamlit Community Cloud, conecta el repositorio.
-4. Define `OPENAI_API_KEY` en **Secrets** si quieres activar la síntesis avanzada.
-5. Despliega la app.
-
-## Nota final
-
-Esta versión está planteada como un **MVP funcional**. Sirve para validar flujo, utilidad y adopción interna. Cuando el equipo confirme el valor del radar, lo razonable será pasar a una segunda fase con:
-
-- fuentes mejor curadas,
-- clasificación más robusta,
-- prompts y reglas específicas por especie,
-- capa de conocimiento corporativo,
-- y control más fino de trazabilidad documental.
+```bash
+pip install -r requirements.txt
+streamlit run main.py
+```
